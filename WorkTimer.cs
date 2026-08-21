@@ -327,6 +327,35 @@ namespace WorkTimer
         }
         public static string SessionsFile { get { return Path.Combine(Dir, "sessions.csv"); } }
         public static string OverridesFile { get { return Path.Combine(Dir, "overrides.csv"); } }
+        public static string SettingsFile { get { return Path.Combine(Dir, "settings.ini"); } }
+
+        public static Dictionary<string, string> LoadSettings()
+        {
+            Dictionary<string, string> s = new Dictionary<string, string>();
+            if (!File.Exists(SettingsFile)) return s;
+            try
+            {
+                foreach (string line in File.ReadAllLines(SettingsFile))
+                {
+                    int i = line.IndexOf('=');
+                    if (i > 0) s[line.Substring(0, i).Trim()] = line.Substring(i + 1).Trim();
+                }
+            }
+            catch { }
+            return s;
+        }
+
+        public static void SaveSettings(Dictionary<string, string> s)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                foreach (KeyValuePair<string, string> kv in s)
+                    sb.AppendLine(kv.Key + "=" + kv.Value);
+                File.WriteAllText(SettingsFile, sb.ToString(), Encoding.UTF8);
+            }
+            catch { }
+        }
 
         public static List<Segment> LoadSegments()
         {
@@ -400,11 +429,13 @@ namespace WorkTimer
 
         NotifyIcon tray;
         ContextMenuStrip menu;
-        ToolStripMenuItem miStartPause, miStop, miShow, miAutostart;
+        ToolStripMenuItem miStartPause, miStop, miShow, miAutostart, miWidget;
         Icon icoRun, icoIdle, icoPause;
 
-        GButton btStartPause, btStop, btPrev, btNext, btExport, btMin, btClose;
+        GButton btStartPause, btStop, btPrev, btNext, btExport, btMin, btClose, btWidget;
         DayList dayList;
+        HudWidget hud;
+        Dictionary<string, string> settings = new Dictionary<string, string>();
         System.Windows.Forms.Timer timer;
 
         string monthTitle = "", monthTotal = "0:00", statsLine = "";
@@ -427,9 +458,14 @@ namespace WorkTimer
         {
             segments = Store.LoadSegments();
             overrides = Store.LoadOverrides();
+            settings = Store.LoadSettings();
             BuildIcons();
             BuildTray();
             BuildWindow();
+
+            string wOn;
+            if (!settings.TryGetValue("widget", out wOn) || wOn != "0") ShowHud();
+            SyncWidgetUi();
 
             timer = new System.Windows.Forms.Timer();
             timer.Interval = 1000;
@@ -522,6 +558,7 @@ namespace WorkTimer
             miStop = new ToolStripMenuItem("Стоп — завершить сессию", null, delegate { StopSession(); });
             miShow = new ToolStripMenuItem("Показать окно", null, delegate { ToggleWindow(); });
             miAutostart = new ToolStripMenuItem("Запускать с Windows", null, delegate { ToggleAutostart(); });
+            miWidget = new ToolStripMenuItem("Виджет на экране", null, delegate { ToggleWidget(); });
 
             menu.Items.Add(miStartPause);
             menu.Items.Add(miStop);
@@ -530,6 +567,7 @@ namespace WorkTimer
             menu.Items.Add(new ToolStripMenuItem("Папка с данными", null, delegate {
                 try { System.Diagnostics.Process.Start("explorer.exe", Store.Dir); } catch { } }));
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(miWidget);
             menu.Items.Add(miAutostart);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("Выход", null, delegate { ExitApp(); }));
@@ -635,15 +673,23 @@ namespace WorkTimer
             btExport.Text = "Экспорт CSV";
             btExport.Radius = 12;
             btExport.ForeColor = Skin.Muted;
-            btExport.SetBounds(20, H - 52, 150, 38);
+            btExport.SetBounds(20, H - 52, 132, 38);
             btExport.Click += delegate { ExportCsv(); };
             Controls.Add(btExport);
+
+            btWidget = new GButton();
+            btWidget.Text = "Виджет: выкл";
+            btWidget.Radius = 12;
+            btWidget.ForeColor = Skin.Muted;
+            btWidget.SetBounds(162, H - 52, 128, 38);
+            btWidget.Click += delegate { ToggleWidget(); };
+            Controls.Add(btWidget);
 
             GButton btHide = new GButton();
             btHide.Text = "Свернуть в трей";
             btHide.Radius = 12;
             btHide.ForeColor = Skin.Muted;
-            btHide.SetBounds(180, H - 52, 160, 38);
+            btHide.SetBounds(300, H - 52, 166, 38);
             btHide.Click += delegate { HideWindow(); };
             Controls.Add(btHide);
 
@@ -766,9 +812,8 @@ namespace WorkTimer
                 new Rectangle(22, MonthRect.Bottom + 10, W - 44, 18), Skin.Dim,
                 TextFormatFlags.Left | TextFormatFlags.NoPadding);
             TextRenderer.DrawText(g, "2 клика по дню — правка", Skin.F(8f, FontStyle.Regular),
-                new Rectangle(W - 136, H - 52, 116, 38), Color.FromArgb(64, 72, 92),
-                TextFormatFlags.Right | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+                new Rectangle(22, MonthRect.Bottom + 10, W - 44, 18), Color.FromArgb(70, 79, 100),
+                TextFormatFlags.Right | TextFormatFlags.NoPadding);
         }
 
         protected override void SetVisibleCore(bool value)
@@ -815,6 +860,74 @@ namespace WorkTimer
 
         // ---------- логика ----------
         bool Running { get { return runStart.HasValue; } }
+
+        // --- доступ для плавающего виджета ---
+        internal bool RunningPub { get { return Running; } }
+        internal double TodayPub { get { return TodayMinutes(); } }
+        internal double SessionPub { get { return CurrentSessionMinutes(); } }
+        internal void TogglePub() { ToggleRun(); }
+        internal void OpenMainPub() { if (!Visible) ToggleWindow(); else { Activate(); BringToFront(); } }
+        internal void ShowMenuAt(Point screenPt) { menu.Show(screenPt); }
+
+        internal void SaveWidgetPos()
+        {
+            if (hud == null || hud.IsDisposed) return;
+            settings["wx"] = hud.Left.ToString(CultureInfo.InvariantCulture);
+            settings["wy"] = hud.Top.ToString(CultureInfo.InvariantCulture);
+            Store.SaveSettings(settings);
+        }
+
+        void ToggleWidget()
+        {
+            bool turnOn = hud == null || hud.IsDisposed;
+            settings["widget"] = turnOn ? "1" : "0";
+            Store.SaveSettings(settings);
+            if (turnOn) ShowHud(); else HideHud();
+            SyncWidgetUi();
+        }
+
+        void ShowHud()
+        {
+            if (hud != null && !hud.IsDisposed) return;
+            hud = new HudWidget(this);
+
+            int x, y;
+            string sx, sy;
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            if (!(settings.TryGetValue("wx", out sx) && settings.TryGetValue("wy", out sy) &&
+                  int.TryParse(sx, NumberStyles.Integer, CultureInfo.InvariantCulture, out x) &&
+                  int.TryParse(sy, NumberStyles.Integer, CultureInfo.InvariantCulture, out y)))
+            {
+                x = wa.Right - hud.Width - 24;
+                y = wa.Top + 24;
+            }
+
+            Rectangle virt = SystemInformation.VirtualScreen;
+            if (x < virt.Left) x = virt.Left + 24;
+            if (y < virt.Top) y = virt.Top + 24;
+            if (x > virt.Right - 60) x = virt.Right - hud.Width - 24;
+            if (y > virt.Bottom - 40) y = virt.Bottom - hud.Height - 24;
+
+            hud.Location = new Point(x, y);
+            hud.Show();
+            hud.Refresh2();
+        }
+
+        void HideHud()
+        {
+            if (hud == null) return;
+            if (!hud.IsDisposed) { hud.Hide(); hud.Dispose(); }
+            hud = null;
+        }
+
+        void SyncWidgetUi()
+        {
+            bool on = hud != null && !hud.IsDisposed;
+            miWidget.Checked = on;
+            btWidget.Text = on ? "Виджет: вкл" : "Виджет: выкл";
+            btWidget.ForeColor = on ? Skin.A2 : Skin.Muted;
+            btWidget.Invalidate();
+        }
 
         void ToggleRun()
         {
@@ -920,7 +1033,12 @@ namespace WorkTimer
         }
 
         // ---------- обновление ----------
-        void UpdateAll() { UpdateTrayText(); UpdateWindow(); }
+        void UpdateAll()
+        {
+            UpdateTrayText();
+            UpdateWindow();
+            if (hud != null && !hud.IsDisposed) hud.Refresh2();
+        }
 
         void UpdateTrayText()
         {
@@ -1102,10 +1220,311 @@ namespace WorkTimer
         {
             if (Running) CloseSegment();
             SaveNow();
+            SaveWidgetPos();
+            HideHud();
             timer.Stop();
             tray.Visible = false;
             tray.Dispose();
             Application.Exit();
+        }
+    }
+
+    // ================= ПЛАВАЮЩИЙ ВИДЖЕТ =================
+    class HudWidget : Form
+    {
+        readonly TrayApp app;
+        const int WW = 214, WH = 70;
+
+        bool hover, overBtn, pressBtn, dragging, armed;
+        Point grabScreen, grabOrigin;
+        Bitmap buf;        // переиспользуемый холст — чтобы не мусорить каждым кадром
+        Graphics bufG;
+        float pulse = 0;
+        string lastKey = "";
+        System.Windows.Forms.Timer tick;
+
+        static readonly Rectangle BtnRect = new Rectangle(WW - 52, WH / 2 - 17, 34, 34);
+
+        public HudWidget(TrayApp owner)
+        {
+            app = owner;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            Size = new Size(WW, WH);
+            Cursor = Cursors.SizeAll;
+
+            tick = new System.Windows.Forms.Timer();
+            tick.Interval = 1000;
+            tick.Tick += delegate { Beat(); };
+            tick.Start();
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x00080000;  // WS_EX_LAYERED
+                cp.ExStyle |= 0x00000080;  // WS_EX_TOOLWINDOW — не показывать в Alt+Tab
+                return cp;
+            }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Render();
+        }
+
+        void Beat()
+        {
+            bool run = app.RunningPub;
+            tick.Interval = run ? 120 : 1000;
+            if (run) pulse += 0.14f;
+            string key = Key();
+            if (run || key != lastKey || hover) { lastKey = key; Render(); }
+        }
+
+        string Key()
+        {
+            return app.RunningPub + "|" + TrayApp.Fmt(app.TodayPub) + "|" +
+                   TrayApp.Fmt(app.SessionPub) + "|" + hover + overBtn;
+        }
+
+        public void Refresh2() { lastKey = ""; Beat(); }
+
+        // ---------- отрисовка в ARGB-битмап ----------
+        void Render()
+        {
+            if (!IsHandleCreated) return;
+            if (buf == null)
+            {
+                buf = new Bitmap(WW, WH, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                bufG = Graphics.FromImage(buf);
+            }
+            {
+                Graphics g = bufG;
+                {
+                    g.CompositingMode = CompositingMode.SourceOver;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    g.Clear(Color.Transparent);
+
+                    bool run = app.RunningPub;
+                    bool paused = !run && app.SessionPub > 0;
+                    Color acc = run ? Skin.Green : (paused ? Skin.Amber : Skin.Muted);
+                    int bgA = hover ? 246 : 216;
+
+                    RectangleF card = new RectangleF(1, 1, WW - 2, WH - 2);
+                    using (GraphicsPath p = Skin.Round(card, 18))
+                    {
+                        using (LinearGradientBrush lg = new LinearGradientBrush(card,
+                            Color.FromArgb(bgA, 24, 28, 40), Color.FromArgb(bgA, 14, 17, 25),
+                            LinearGradientMode.Vertical))
+                            g.FillPath(lg, p);
+                        using (Pen pn = new Pen(Color.FromArgb(run ? 90 : 46, acc), 1.4f))
+                            g.DrawPath(pn, p);
+                    }
+
+                    // пульсирующая точка состояния
+                    float k = run ? (float)(0.5 + 0.5 * Math.Sin(pulse)) : 1f;
+                    float dr = run ? 5f + 2f * k : 5f;
+                    if (run)
+                        using (SolidBrush halo = new SolidBrush(Color.FromArgb((int)(70 * k), acc)))
+                            g.FillEllipse(halo, 17 - dr - 4, WH / 2f - dr - 4, (dr + 4) * 2, (dr + 4) * 2);
+                    using (SolidBrush db = new SolidBrush(acc))
+                        g.FillEllipse(db, 17 - 4.5f, WH / 2f - 4.5f, 9, 9);
+
+                    // время
+                    string big = TrayApp.Fmt(app.TodayPub);
+                    using (Font bf = new Font("Segoe UI", 19f, FontStyle.Bold))
+                    using (LinearGradientBrush lg = new LinearGradientBrush(
+                        new RectangleF(32, 10, 110, 30), Color.FromArgb(250, 245, 248, 255),
+                        run ? Color.FromArgb(250, Skin.A2) : Color.FromArgb(230, Skin.Muted),
+                        LinearGradientMode.Horizontal))
+                        g.DrawString(big, bf, lg, 31, 11, StringFormat.GenericTypographic);
+
+                    string sub = run || paused
+                        ? "сессия " + TrayApp.Fmt(app.SessionPub)
+                        : "остановлен";
+                    using (Font sf = new Font("Segoe UI", 7.5f, FontStyle.Regular))
+                    using (SolidBrush sb = new SolidBrush(Color.FromArgb(190, Skin.Dim)))
+                        g.DrawString(sub, sf, sb, 33, 43, StringFormat.GenericTypographic);
+
+                    // кнопка старт/пауза
+                    Color bc = overBtn
+                        ? (pressBtn ? Color.FromArgb(255, Skin.Card3) : Color.FromArgb(240, Skin.Card3))
+                        : Color.FromArgb(150, Skin.Card2);
+                    using (SolidBrush bb = new SolidBrush(bc))
+                        g.FillEllipse(bb, BtnRect);
+                    if (overBtn)
+                        using (Pen pn = new Pen(Color.FromArgb(120, acc), 1.2f))
+                            g.DrawEllipse(pn, BtnRect);
+
+                    float cx = BtnRect.X + BtnRect.Width / 2f, cy = BtnRect.Y + BtnRect.Height / 2f;
+                    using (SolidBrush w = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
+                    {
+                        if (run)
+                        {
+                            g.FillRectangle(w, cx - 4.5f, cy - 6, 3.2f, 12);
+                            g.FillRectangle(w, cx + 1.3f, cy - 6, 3.2f, 12);
+                        }
+                        else
+                        {
+                            g.FillPolygon(w, new PointF[] {
+                                new PointF(cx - 4, cy - 6.5f),
+                                new PointF(cx + 6, cy),
+                                new PointF(cx - 4, cy + 6.5f) });
+                        }
+                    }
+
+                    // прогресс до 8 часов
+                    float frac = (float)Math.Min(1.0, app.TodayPub / 480.0);
+                    RectangleF tr = new RectangleF(16, WH - 11, WW - 32, 3);
+                    using (GraphicsPath tp = Skin.Round(tr, 1.5f))
+                    using (SolidBrush tb = new SolidBrush(Color.FromArgb(70, 90, 105, 140)))
+                        g.FillPath(tb, tp);
+                    if (frac > 0.005f)
+                    {
+                        RectangleF fr = new RectangleF(tr.X, tr.Y, tr.Width * frac, 3);
+                        using (GraphicsPath fp = Skin.Round(fr, 1.5f))
+                        using (LinearGradientBrush lg = new LinearGradientBrush(
+                            new RectangleF(tr.X, tr.Y, tr.Width, 3),
+                            frac >= 1f ? Skin.Green : Skin.A1,
+                            frac >= 1f ? Skin.A2 : Skin.A2, LinearGradientMode.Horizontal))
+                            g.FillPath(lg, fp);
+                    }
+                }
+                SetBitmap(buf);
+            }
+        }
+
+        // ---------- слоёное окно ----------
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+        [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr h, IntPtr dst,
+            ref PT ppt, ref SZ psz, IntPtr src, ref PT pptSrc, int key, ref BLEND bl, int flags);
+
+        [StructLayout(LayoutKind.Sequential)] struct PT { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] struct SZ { public int W, H; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct BLEND { public byte Op, Flags, Alpha, Format; }
+
+        void SetBitmap(Bitmap bmp)
+        {
+            IntPtr screen = GetDC(IntPtr.Zero);
+            IntPtr mem = CreateCompatibleDC(screen);
+            IntPtr hbmp = IntPtr.Zero, old = IntPtr.Zero;
+            try
+            {
+                hbmp = bmp.GetHbitmap(Color.FromArgb(0));
+                old = SelectObject(mem, hbmp);
+                SZ sz; sz.W = bmp.Width; sz.H = bmp.Height;
+                PT src; src.X = 0; src.Y = 0;
+                PT pos; pos.X = Left; pos.Y = Top;
+                BLEND bl;
+                bl.Op = 0; bl.Flags = 0; bl.Alpha = 255; bl.Format = 1; // AC_SRC_ALPHA
+                UpdateLayeredWindow(Handle, screen, ref pos, ref sz, mem, ref src, 0, ref bl, 2);
+            }
+            finally
+            {
+                ReleaseDC(IntPtr.Zero, screen);
+                if (hbmp != IntPtr.Zero) { SelectObject(mem, old); DeleteObject(hbmp); }
+                DeleteDC(mem);
+            }
+        }
+
+        // ---------- мышь ----------
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            hover = true; Render(); base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            hover = false; overBtn = false; pressBtn = false; Render(); base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (armed)
+            {
+                Point now = PointToScreen(e.Location);
+                int dx = now.X - grabScreen.X, dy = now.Y - grabScreen.Y;
+                if (!dragging && (Math.Abs(dx) > 3 || Math.Abs(dy) > 3)) dragging = true;
+                if (dragging) Location = new Point(grabOrigin.X + dx, grabOrigin.Y + dy);
+                return;
+            }
+            bool ob = BtnRect.Contains(e.Location);
+            Cursor = ob ? Cursors.Hand : Cursors.SizeAll;
+            if (ob != overBtn) { overBtn = ob; Render(); }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                app.ShowMenuAt(PointToScreen(e.Location));
+                return;
+            }
+            if (e.Button != MouseButtons.Left) return;
+
+            if (BtnRect.Contains(e.Location)) { pressBtn = true; Render(); return; }
+
+            armed = true;
+            dragging = false;
+            grabScreen = PointToScreen(e.Location);
+            grabOrigin = Location;
+            Capture = true;
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (pressBtn)
+            {
+                pressBtn = false;
+                if (BtnRect.Contains(e.Location)) app.TogglePub();
+                Render();
+            }
+            if (armed)
+            {
+                armed = false;
+                Capture = false;
+                if (dragging) { dragging = false; app.SaveWidgetPos(); }
+            }
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            if (!BtnRect.Contains(e.Location)) app.OpenMainPub();
+            base.OnMouseDoubleClick(e);
+        }
+
+        protected override void OnMove(EventArgs e)
+        {
+            base.OnMove(e);
+            if (IsHandleCreated) Render();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (tick != null) { tick.Stop(); tick.Dispose(); tick = null; }
+                if (bufG != null) { bufG.Dispose(); bufG = null; }
+                if (buf != null) { buf.Dispose(); buf = null; }
+            }
+            base.Dispose(disposing);
         }
     }
 
