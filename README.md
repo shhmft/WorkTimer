@@ -7,7 +7,7 @@
 
 ### [⬇ Скачать WorkTimer.exe](https://github.com/shhmft/WorkTimer/releases/latest/download/WorkTimer.exe)
 
-![exe 43 КБ](https://img.shields.io/badge/exe-43_КБ-7C5CFF?style=flat-square)
+![exe 81 КБ](https://img.shields.io/badge/exe-81_КБ-7C5CFF?style=flat-square)
 ![RAM 7 МБ](https://img.shields.io/badge/RAM-7_МБ-22D3EE?style=flat-square)
 ![CPU 0%](https://img.shields.io/badge/CPU_в_простое-0%25-2DD489?style=flat-square)
 ![Без зависимостей](https://img.shields.io/badge/зависимости-нет-64748B?style=flat-square)
@@ -85,7 +85,7 @@
 build.cmd
 ```
 
-Один файл `WorkTimer.cs`, компилятор `csc.exe` уже есть в Windows.
+Один файл `WorkTimer.cs` плюс `icon.ico`, компилятор `csc.exe` уже есть в Windows.
 Исходник должен быть в **UTF-8 с BOM** — иначе компилятор испортит русский текст.
 
 ## Лицензия
