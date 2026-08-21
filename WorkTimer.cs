@@ -1910,6 +1910,7 @@ namespace WorkTimer
         [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
         [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+        [DllImport("gdi32.dll")] static extern int GdiFlush();
         [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO bmi,
             uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr h, IntPtr dst,
@@ -1974,6 +1975,10 @@ namespace WorkTimer
 
         void Flush()
         {
+            // GDI+ пишет в память не сразу; без этого система успевает
+            // прочитать недорисованный кадр и края обрезаются
+            GdiFlush();
+
             SZ sz; sz.W = Width; sz.H = Height;
             PT src; src.X = 0; src.Y = 0;
             PT pos; pos.X = Left; pos.Y = Top;
@@ -2068,7 +2073,12 @@ namespace WorkTimer
             {
                 armed = false;
                 Capture = false;
-                if (dragging) { dragging = false; app.SaveWidgetPos(); }
+                if (dragging)
+                {
+                    dragging = false;
+                    ClampToScreen();
+                    app.SaveWidgetPos();
+                }
             }
             base.OnMouseUp(e);
         }
@@ -2079,6 +2089,18 @@ namespace WorkTimer
                 !InSlider(e.Location))
                 app.OpenMainPub();
             base.OnMouseDoubleClick(e);
+        }
+
+        // не даём утащить плашку за край монитора — иначе система обрежет её
+        void ClampToScreen()
+        {
+            Rectangle wa = Screen.FromRectangle(Bounds).WorkingArea;
+            int x = Left, y = Top;
+            if (x + Width > wa.Right) x = wa.Right - Width;
+            if (y + Height > wa.Bottom) y = wa.Bottom - Height;
+            if (x < wa.Left) x = wa.Left;
+            if (y < wa.Top) y = wa.Top;
+            if (x != Left || y != Top) Location = new Point(x, y);
         }
 
         protected override void OnMove(EventArgs e)
