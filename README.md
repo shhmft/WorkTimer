@@ -5,6 +5,8 @@
 **Крошечный трекер рабочих часов, который живёт в трее Windows.**
 Нажал «Старт» — считает. В конце месяца показывает итог по дням и отдаёт CSV для табеля.
 
+### [⬇ Скачать WorkTimer.exe](https://github.com/shhmft/WorkTimer/releases/latest/download/WorkTimer.exe)
+
 ![exe 35 КБ](https://img.shields.io/badge/exe-35_КБ-7C5CFF?style=flat-square)
 ![RAM 6.5 МБ](https://img.shields.io/badge/RAM-6.5_МБ-22D3EE?style=flat-square)
 ![CPU 0%](https://img.shields.io/badge/CPU_в_простое-0%25-2DD489?style=flat-square)
@@ -37,7 +39,8 @@
 
 ## Установка
 
-Скачай `WorkTimer.exe` и запусти. Всё.
+Скачай [`WorkTimer.exe`](https://github.com/shhmft/WorkTimer/releases/latest/download/WorkTimer.exe)
+из [последнего релиза](https://github.com/shhmft/WorkTimer/releases/latest) и запусти. Всё.
 
 Никакого инсталлятора и рантайма — программа работает на .NET Framework 4,
 который уже встроен в каждую Windows.
