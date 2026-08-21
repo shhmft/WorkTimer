@@ -545,6 +545,8 @@ namespace WorkTimer
         DateTime lastSave = DateTime.Now;
         int lastSecond = -1;
         float pulse = 0;
+        string lastRowsKey = "";
+        static readonly CultureInfo Ru = CultureInfo.GetCultureInfo("ru-RU");
         float sheen = 0;              // бегущий блик по карточке
         float popT = 0;               // «подскок» цифр при смене минуты
         string lastBig = "";
@@ -568,6 +570,89 @@ namespace WorkTimer
         const int W = 486, H = 736;
         static readonly Rectangle HeroRect = new Rectangle(20, 62, W - 40, 154);
         static readonly Rectangle MonthRect = new Rectangle(20, 296, W - 40, 348);
+
+        // ---------- настройки ----------
+        internal double WidgetAlpha
+        {
+            get
+            {
+                string v; double d;
+                if (settings.TryGetValue("alpha", out v) &&
+                    double.TryParse(v, NumberStyles.Any, CultureInfo.InvariantCulture, out d))
+                    return Math.Max(0.35, Math.Min(1.0, d));
+                return 0.92;
+            }
+            set
+            {
+                double d = Math.Max(0.35, Math.Min(1.0, value));
+                settings["alpha"] = d.ToString("0.###", CultureInfo.InvariantCulture);
+                Store.SaveSettings(settings);
+            }
+        }
+
+        internal bool HotkeyOn
+        {
+            get { string v; return settings.TryGetValue("hotkey", out v) && v == "1"; }
+        }
+
+        internal void SetHotkey(bool on)
+        {
+            settings["hotkey"] = on ? "1" : "0";
+            Store.SaveSettings(settings);
+            ApplyHotkey();
+        }
+
+        internal bool WidgetOn { get { return hud != null && !hud.IsDisposed; } }
+        internal void RefreshWidgetAlpha() { if (WidgetOn) hud.ApplyAlpha(); }
+        internal void ToggleWidgetPub() { ToggleWidget(); }
+        internal bool AutostartOn { get { return IsAutostart(); } }
+        internal void ToggleAutostartPub() { ToggleAutostart(); }
+
+        // ---------- глобальная горячая клавиша ----------
+        const int HOTKEY_ID = 0xA71;
+        bool hotkeyRegistered;
+
+        [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
+        [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr h, int id);
+
+        void ApplyHotkey()
+        {
+            if (!IsHandleCreated) return;
+            if (hotkeyRegistered) { UnregisterHotKey(Handle, HOTKEY_ID); hotkeyRegistered = false; }
+            if (!HotkeyOn) return;
+            // MOD_ALT(1) | MOD_CONTROL(2) | MOD_NOREPEAT(0x4000), VK_SPACE = 0x20
+            hotkeyRegistered = RegisterHotKey(Handle, HOTKEY_ID, 1 | 2 | 0x4000, 0x20);
+            if (!hotkeyRegistered)
+                MessageBox.Show("Не удалось занять Ctrl+Alt+Space — сочетание уже занято другой программой.",
+                    "WorkTimer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // дескриптор появляется позже конструктора — регистрируем клавишу здесь
+            ApplyHotkey();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            // 0x0312 WM_HOTKEY, 0x0011 WM_QUERYENDSESSION, 0x0016 WM_ENDSESSION
+            if (m.Msg == 0x0312 && m.WParam.ToInt32() == HOTKEY_ID) { ToggleRun(); return; }
+            if (m.Msg == 0x0011 || m.Msg == 0x0016) FlushForShutdown();
+            base.WndProc(ref m);
+        }
+
+        // закрыть текущий отрезок и записать всё на диск — вызывается при
+        // завершении сеанса, спящем режиме и выходе, чтобы ничего не терялось
+        void FlushForShutdown()
+        {
+            try
+            {
+                if (Running) CloseSegment();
+                SaveNow();
+            }
+            catch { }
+        }
 
         const string RUNKEY = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
         const string RUNVAL = "WorkTimer";
@@ -596,6 +681,17 @@ namespace WorkTimer
             timer.Interval = 1000;
             timer.Tick += OnTick;
             timer.Start();
+
+            ApplyHotkey();
+
+            // сохранить всё при завершении сеанса, засыпании и блокировке
+            SystemEvents.SessionEnding += delegate { FlushForShutdown(); };
+            SystemEvents.SessionSwitch += delegate { SaveNow(); };
+            SystemEvents.PowerModeChanged += delegate(object s, PowerModeChangedEventArgs e)
+            {
+                if (e.Mode == PowerModes.Suspend) FlushForShutdown();
+            };
+            Application.ApplicationExit += delegate { FlushForShutdown(); };
 
             UpdateAll();
             TrimMemory();
@@ -689,6 +785,7 @@ namespace WorkTimer
             menu.Items.Add(miStop);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(miShow);
+            menu.Items.Add(new ToolStripMenuItem("Настройки", null, delegate { OpenSettings(); }));
             menu.Items.Add(new ToolStripMenuItem("Папка с данными", null, delegate {
                 try { System.Diagnostics.Process.Start("explorer.exe", Store.Dir); } catch { } }));
             menu.Items.Add(new ToolStripSeparator());
@@ -729,6 +826,16 @@ namespace WorkTimer
             IntPtr rgn = CreateRoundRectRgn(0, 0, W + 1, H + 1, 20, 20);
             Region = Region.FromHrgn(rgn);
             DeleteObject(rgn);
+
+            GButton btCfg = new GButton();
+            btCfg.Style = GButton.Kind.Icon;
+            btCfg.Text = "⚙";
+            btCfg.Font = Skin.F(11f, FontStyle.Regular);
+            btCfg.ForeColor = Skin.Muted;
+            btCfg.Radius = 8;
+            btCfg.SetBounds(W - 112, 14, 28, 28);
+            btCfg.Click += delegate { OpenSettings(); };
+            Controls.Add(btCfg);
 
             btMin = new GButton();
             btMin.Style = GButton.Kind.Icon;
@@ -843,16 +950,26 @@ namespace WorkTimer
             bool running = Running;
             bool paused = !running && sessionAccumMin > 0;
 
+            // Во время учёта карточка перерисовывается 20 раз в секунду.
+            // Рисуем только то, что попало в область обновления.
+            Rectangle clip = Rectangle.Ceiling(g.VisibleClipBounds);
+            bool needHead = clip.IntersectsWith(new Rectangle(0, 0, W, 58));
+            bool needHero = clip.IntersectsWith(HeroRect);
+            bool needRest = clip.Bottom > MonthRect.Y - 40;
+
             // шапка
+            if (needHead)
             using (GraphicsPath lp = Skin.Round(new RectangleF(20, 21, 14, 14), 4))
             using (LinearGradientBrush lg = new LinearGradientBrush(
                 new Rectangle(20, 21, 14, 14), Skin.A1, Skin.A2, LinearGradientMode.ForwardDiagonal))
                 g.FillPath(lg, lp);
-            TextRenderer.DrawText(g, "W O R K T I M E R", Skin.F(8.5f, FontStyle.Bold),
-                new Rectangle(44, 20, 240, 18), Skin.Muted,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            if (needHead)
+                TextRenderer.DrawText(g, "W O R K T I M E R", Skin.F(8.5f, FontStyle.Bold),
+                    new Rectangle(44, 20, 240, 18), Skin.Muted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
             // карточка «сегодня»
+            if (needHero) {
             Color acc = running ? Skin.Green : (paused ? Skin.Amber : Skin.Dim);
             using (GraphicsPath hp = Skin.Round(HeroRect, 20))
             {
@@ -942,6 +1059,9 @@ namespace WorkTimer
                 new Rectangle(HeroRect.Right - 210, HeroRect.Y + 80, 190, 30),
                 running ? Skin.Text : Skin.Muted,
                 TextFormatFlags.Right | TextFormatFlags.NoPadding);
+            }
+
+            if (!needRest) return;
 
             // карточка месяца
             using (GraphicsPath mp = Skin.Round(MonthRect, 20))
@@ -1067,8 +1187,19 @@ namespace WorkTimer
         {
             if (hud == null || hud.IsDisposed) return;
             settings["wx"] = hud.Left.ToString(CultureInfo.InvariantCulture);
-            settings["wy"] = hud.Top.ToString(CultureInfo.InvariantCulture);
+            settings["wy"] = hud.AnchorTop.ToString(CultureInfo.InvariantCulture);
             Store.SaveSettings(settings);
+        }
+
+        void OpenSettings()
+        {
+            bool wasHidden = !Visible;
+            if (wasHidden) ToggleWindow();
+            using (SettingsDialog d = new SettingsDialog(this))
+                d.ShowDialog(this);
+            SyncWidgetUi();
+            miAutostart.Checked = IsAutostart();
+            UpdateAll();
         }
 
         void ToggleWidget()
@@ -1127,6 +1258,7 @@ namespace WorkTimer
         {
             if (Running) CloseSegment();
             else runStart = DateTime.Now;
+            DropCache(); lastRowsKey = "";
             SaveNow();
             UpdateAll();
         }
@@ -1135,6 +1267,7 @@ namespace WorkTimer
         {
             if (Running) CloseSegment();
             sessionAccumMin = 0;
+            DropCache(); lastRowsKey = "";
             SaveNow();
             UpdateAll();
         }
@@ -1154,7 +1287,15 @@ namespace WorkTimer
 
         void OnTick(object sender, EventArgs e)
         {
-            if (Running && (DateTime.Now - lastSave).TotalSeconds >= 30) SaveNow();
+            if (Running && (DateTime.Now - lastSave).TotalSeconds >= 15) SaveNow();
+
+            // когда окно спрятано и счёт стоит, показывать нечего — просыпаемся
+            // раз в 5 секунд вместо каждой секунды
+            if (!Visible)
+            {
+                int want = Running ? 1000 : 5000;
+                if (timer.Interval != want) timer.Interval = want;
+            }
 
             if (Visible)
             {
@@ -1215,11 +1356,25 @@ namespace WorkTimer
             return string.Format("{0}:{1:00}", total / 60, total % 60);
         }
 
+        // Пересчёт по всем отрезкам стоит недёшево, а отрисовка идёт до 20 раз
+        // в секунду. Значение меняется не чаще раза в секунду — кэшируем.
+        double todayCache = -1;
+        DateTime todayCacheAt = DateTime.MinValue;
+
+        internal void DropCache() { todayCache = -1; }
+
         double TodayMinutes()
         {
+            DateTime now = DateTime.Now;
+            if (todayCache >= 0 && (now - todayCacheAt).TotalMilliseconds < 900 &&
+                now.Date == todayCacheAt.Date)
+                return todayCache;
+
             Dictionary<DateTime, double> map = BuildDayMap();
-            DateTime k = DateTime.Now.Date;
-            return map.ContainsKey(k) ? map[k] : 0;
+            DateTime k = now.Date;
+            todayCache = map.ContainsKey(k) ? map[k] : 0;
+            todayCacheAt = now;
+            return todayCache;
         }
 
         double CurrentSessionMinutes()
@@ -1232,6 +1387,11 @@ namespace WorkTimer
         // ---------- обновление ----------
         void UpdateAll()
         {
+            if (!Visible && timer != null)
+            {
+                int want = Running ? 1000 : 5000;
+                if (timer.Interval != want) timer.Interval = want;
+            }
             UpdateTrayText();
             UpdateWindow();
             if (hud != null && !hud.IsDisposed) hud.Refresh2();
@@ -1265,7 +1425,18 @@ namespace WorkTimer
             btStartPause.Invalidate();
             Icon = running ? icoRun : (paused ? icoPause : icoIdle);
 
-            CultureInfo ru = CultureInfo.GetCultureInfo("ru-RU");
+            string big = Fmt(TodayMinutes());
+            if (lastBig.Length > 0 && big != lastBig) popT = 1f;
+            lastBig = big;
+
+            // список по дням пересобираем только когда есть что менять,
+            // а не каждую секунду
+            string rowsKey = viewMonth.ToString("yyyyMM") + "|" + segments.Count + "|" +
+                             overrides.Count + "|" + big + "|" + running;
+            if (rowsKey == lastRowsKey) { Invalidate(HeroRect); return; }
+            lastRowsKey = rowsKey;
+
+            CultureInfo ru = Ru;
             monthTitle = ru.TextInfo.ToTitleCase(viewMonth.ToString("MMMM yyyy", ru));
 
             Dictionary<DateTime, double> map = BuildDayMap();
@@ -1293,11 +1464,6 @@ namespace WorkTimer
             }
 
             dayList.SetRows(rows, max);
-
-            string big = Fmt(TodayMinutes());
-            if (lastBig.Length > 0 && big != lastBig) popT = 1f;
-            lastBig = big;
-
             monthTotal = Fmt(total);
             statsLine = string.Format("{0} дн.   ·   в среднем {1}   ·   {2} ч. десятичных",
                 worked, Fmt(worked > 0 ? total / worked : 0),
@@ -1329,6 +1495,7 @@ namespace WorkTimer
                 }
                 overrides[day] = mins;
             }
+            DropCache(); lastRowsKey = "";
             SaveNow();
             UpdateAll();
         }
@@ -1361,32 +1528,48 @@ namespace WorkTimer
 
         void ExportCsv()
         {
+            DateTime a = new DateTime(viewMonth.Year, viewMonth.Month, 1);
+            DateTime b = a.AddMonths(1).AddDays(-1);
+
+            DateTime from, to;
+            using (RangeDialog rd = new RangeDialog(a, b))
+            {
+                if (rd.ShowDialog(this) != DialogResult.OK) return;
+                from = rd.From.Date;
+                to = rd.To.Date;
+            }
+
             SaveFileDialog dlg = new SaveFileDialog();
             dlg.Filter = "CSV|*.csv";
-            dlg.FileName = string.Format("worktime_{0:yyyy-MM}.csv", viewMonth);
+            dlg.FileName = from.Year == to.Year && from.Month == to.Month
+                ? string.Format("worktime_{0:yyyy-MM}.csv", from)
+                : string.Format("worktime_{0:yyyy-MM-dd}_{1:yyyy-MM-dd}.csv", from, to);
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
             Dictionary<DateTime, double> map = BuildDayMap();
-            int days = DateTime.DaysInMonth(viewMonth.Year, viewMonth.Month);
-            CultureInfo ru = CultureInfo.GetCultureInfo("ru-RU");
+            CultureInfo ru = Ru;
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("Дата;День недели;Часы (чч:мм);Часы (десятичные)");
             double total = 0;
-            for (int d = 1; d <= days; d++)
+            int worked = 0;
+            for (DateTime day = from; day <= to; day = day.AddDays(1))
             {
-                DateTime day = new DateTime(viewMonth.Year, viewMonth.Month, d);
                 double m = map.ContainsKey(day) ? map[day] : 0;
                 if (m <= 0) continue;
-                total += m;
+                total += m; worked++;
                 sb.AppendLine(string.Format("{0};{1};{2};{3}",
                     day.ToString("dd.MM.yyyy"), day.ToString("ddd", ru), Fmt(m),
                     (m / 60.0).ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',')));
             }
             sb.AppendLine();
+            sb.AppendLine(string.Format("Период;{0} — {1};;", from.ToString("dd.MM.yyyy"),
+                to.ToString("dd.MM.yyyy")));
+            sb.AppendLine(string.Format("Рабочих дней;{0};;", worked));
             sb.AppendLine(string.Format("ИТОГО;;{0};{1}", Fmt(total),
                 (total / 60.0).ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',')));
             File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
-            MessageBox.Show("Сохранено: " + dlg.FileName, "WorkTimer");
+            MessageBox.Show(string.Format("Сохранено: {0}{3}{1} дн., всего {2}",
+                dlg.FileName, worked, Fmt(total), Environment.NewLine), "WorkTimer");
         }
 
         // ---------- автозапуск ----------
@@ -1426,6 +1609,7 @@ namespace WorkTimer
             if (Running) CloseSegment();
             SaveNow();
             SaveWidgetPos();
+            if (hotkeyRegistered) { UnregisterHotKey(Handle, HOTKEY_ID); hotkeyRegistered = false; }
             HideHud();
             timer.Stop();
             tray.Visible = false;
@@ -1438,28 +1622,30 @@ namespace WorkTimer
     class HudWidget : Form
     {
         readonly TrayApp app;
-        const int WW = 214, WH = 70;
+        const int WW = 214, WHBase = 70, PanelH = 46;
 
-        bool hover, overBtn, pressBtn, dragging, armed;
-        Point grabScreen, grabOrigin;
-        Bitmap buf;        // переиспользуемый холст — чтобы не мусорить каждым кадром
-        Graphics bufG;
-        float fadeT = 0;   // плавное появление
-        System.Windows.Forms.Timer fadeIn;
+        bool hover, overBtn, pressBtn, overChev, dragging, armed, draggingSlider;
+        bool expanded;
+        float panelT;                    // 0 — свёрнут, 1 — панель раскрыта
         float pulse = 0;
+        float fadeT = 0;                 // плавное появление
+        double userAlpha = 0.92;         // прозрачность, заданная пользователем
+        Point grabScreen, grabOrigin;
         string lastKey = "";
-        System.Windows.Forms.Timer tick;
 
-        static readonly Rectangle BtnRect = new Rectangle(WW - 52, WH / 2 - 17, 34, 34);
+        Bitmap buf;                      // переиспользуемый холст
+        Graphics bufG;
+        System.Windows.Forms.Timer tick, fadeIn, panelAnim;
 
         public HudWidget(TrayApp owner)
         {
             app = owner;
+            userAlpha = app.WidgetAlpha;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             TopMost = true;
-            Size = new Size(WW, WH);
+            Size = new Size(WW, WHBase);
             Cursor = Cursors.SizeAll;
 
             tick = new System.Windows.Forms.Timer();
@@ -1474,7 +1660,7 @@ namespace WorkTimer
             {
                 CreateParams cp = base.CreateParams;
                 cp.ExStyle |= 0x00080000;  // WS_EX_LAYERED
-                cp.ExStyle |= 0x00000080;  // WS_EX_TOOLWINDOW — не показывать в Alt+Tab
+                cp.ExStyle |= 0x00000080;  // WS_EX_TOOLWINDOW — мимо Alt+Tab
                 return cp;
             }
         }
@@ -1501,140 +1687,231 @@ namespace WorkTimer
             fadeIn.Start();
         }
 
+        // Позицию запоминаем так, будто панель свёрнута: иначе после
+        // перезапуска виджет уезжал бы вверх на высоту панели
+        public int AnchorTop { get { return Top + (Height - WHBase); } }
+
+        public void ApplyAlpha()
+        {
+            userAlpha = app.WidgetAlpha;
+            Render();
+        }
+
         void Beat()
         {
             bool run = app.RunningPub;
+            // пока идёт учёт — 8 кадров в секунду ради пульсации точки,
+            // иначе достаточно раза в секунду
             tick.Interval = run ? 120 : 1000;
             if (run) pulse += 0.14f;
             string key = Key();
-            if (run || key != lastKey || hover) { lastKey = key; Render(); }
+            if (run || key != lastKey) { lastKey = key; Render(); }
         }
 
         string Key()
         {
             return app.RunningPub + "|" + TrayApp.Fmt(app.TodayPub) + "|" +
-                   TrayApp.Fmt(app.SessionPub) + "|" + hover + overBtn;
+                   TrayApp.Fmt(app.SessionPub) + "|" + hover + overBtn + overChev + expanded;
         }
 
         public void Refresh2() { lastKey = ""; Beat(); }
 
-        // ---------- отрисовка в ARGB-битмап ----------
+        // ---------- геометрия ----------
+        int Oy { get { return Height - WHBase; } }                       // сдвиг основной строки
+        Rectangle BtnRect { get { return new Rectangle(WW - 52, Oy + WHBase / 2 - 17, 34, 34); } }
+        Rectangle ChevRect { get { return new Rectangle(WW - 30, Oy + 3, 24, 16); } }
+        RectangleF Track { get { return new RectangleF(18, 30, WW - 36, 5); } }
+
+        float AlphaToT(double a) { return (float)((a - 0.35) / 0.65); }
+        double TToAlpha(float t) { return 0.35 + Math.Max(0f, Math.Min(1f, t)) * 0.65; }
+
+        // ---------- раскрытие панели ----------
+        void ToggleExpand()
+        {
+            expanded = !expanded;
+            int bottom = Top + Height;
+            if (panelAnim == null)
+            {
+                panelAnim = new System.Windows.Forms.Timer();
+                panelAnim.Interval = 16;
+                panelAnim.Tick += delegate
+                {
+                    bool done = true;
+                    panelT = Skin.Approach(panelT, expanded ? 1f : 0f, 0.26f, ref done);
+                    int h = WHBase + (int)Math.Round(PanelH * panelT);
+                    SetBounds(Left, panelBottom - h, WW, h);
+                    Render();
+                    if (done) { panelAnim.Stop(); app.SaveWidgetPos(); }
+                };
+            }
+            panelBottom = bottom;
+            panelAnim.Start();
+        }
+        int panelBottom;
+
+        // ---------- отрисовка ----------
         void Render()
         {
             if (!IsHandleCreated) return;
-            if (buf == null)
+            EnsureSurface();
+            if (bufG == null) return;
+
+            Graphics g = bufG;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            g.Clear(Color.Transparent);
+
+            bool run = app.RunningPub;
+            bool paused = !run && app.SessionPub > 0;
+            Color acc = run ? Skin.Green : (paused ? Skin.Amber : Skin.Muted);
+            int bgA = hover ? 246 : 216;
+            int oy = Oy;
+
+            RectangleF card = new RectangleF(1, 1, WW - 2, Height - 2);
+            using (GraphicsPath p = Skin.Round(card, 18))
             {
-                buf = new Bitmap(WW, WH, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                bufG = Graphics.FromImage(buf);
+                using (LinearGradientBrush lg = new LinearGradientBrush(card,
+                    Color.FromArgb(bgA, 24, 28, 40), Color.FromArgb(bgA, 14, 17, 25),
+                    LinearGradientMode.Vertical))
+                    g.FillPath(lg, p);
+                using (Pen pn = new Pen(Color.FromArgb(run ? 90 : 46, acc), 1.4f))
+                    g.DrawPath(pn, p);
             }
+
+            // --- панель прозрачности ---
+            if (panelT > 0.01f)
             {
-                Graphics g = bufG;
+                int a = (int)(255 * panelT);
+                using (SolidBrush lb = new SolidBrush(Color.FromArgb((int)(180 * panelT), Skin.Dim)))
+                    g.DrawString("ПРОЗРАЧНОСТЬ", Skin.F(7f, FontStyle.Bold), lb, 17, 9,
+                        StringFormat.GenericTypographic);
+
+                string pct = Math.Round(userAlpha * 100) + "%";
+                using (SolidBrush vb = new SolidBrush(Color.FromArgb(a, Skin.Text)))
                 {
-                    g.CompositingMode = CompositingMode.SourceOver;
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                    g.Clear(Color.Transparent);
-
-                    bool run = app.RunningPub;
-                    bool paused = !run && app.SessionPub > 0;
-                    Color acc = run ? Skin.Green : (paused ? Skin.Amber : Skin.Muted);
-                    int bgA = hover ? 246 : 216;
-
-                    RectangleF card = new RectangleF(1, 1, WW - 2, WH - 2);
-                    using (GraphicsPath p = Skin.Round(card, 18))
-                    {
-                        using (LinearGradientBrush lg = new LinearGradientBrush(card,
-                            Color.FromArgb(bgA, 24, 28, 40), Color.FromArgb(bgA, 14, 17, 25),
-                            LinearGradientMode.Vertical))
-                            g.FillPath(lg, p);
-                        using (Pen pn = new Pen(Color.FromArgb(run ? 90 : 46, acc), 1.4f))
-                            g.DrawPath(pn, p);
-                    }
-
-                    // пульсирующая точка состояния
-                    float k = run ? (float)(0.5 + 0.5 * Math.Sin(pulse)) : 1f;
-                    float dr = run ? 5f + 2f * k : 5f;
-                    if (run)
-                        using (SolidBrush halo = new SolidBrush(Color.FromArgb((int)(70 * k), acc)))
-                            g.FillEllipse(halo, 17 - dr - 4, WH / 2f - dr - 4, (dr + 4) * 2, (dr + 4) * 2);
-                    using (SolidBrush db = new SolidBrush(acc))
-                        g.FillEllipse(db, 17 - 4.5f, WH / 2f - 4.5f, 9, 9);
-
-                    // время
-                    string big = TrayApp.Fmt(app.TodayPub);
-                    Font bf = Skin.F(19f, FontStyle.Bold);
-                    using (LinearGradientBrush lg = new LinearGradientBrush(
-                        new RectangleF(32, 10, 110, 30), Color.FromArgb(250, 245, 248, 255),
-                        run ? Color.FromArgb(250, Skin.A2) : Color.FromArgb(230, Skin.Muted),
-                        LinearGradientMode.Horizontal))
-                        g.DrawString(big, bf, lg, 31, 11, StringFormat.GenericTypographic);
-
-                    string sub = run || paused
-                        ? "сессия " + TrayApp.Fmt(app.SessionPub)
-                        : "остановлен";
-                    Font sf = Skin.F(7.5f, FontStyle.Regular);
-                    using (SolidBrush sb = new SolidBrush(Color.FromArgb(190, Skin.Dim)))
-                        g.DrawString(sub, sf, sb, 33, 43, StringFormat.GenericTypographic);
-
-                    // кнопка старт/пауза
-                    Color bc = overBtn
-                        ? (pressBtn ? Color.FromArgb(255, Skin.Card3) : Color.FromArgb(240, Skin.Card3))
-                        : Color.FromArgb(150, Skin.Card2);
-                    float shrink = pressBtn ? 2f : 0f;      // кнопка чуть вдавливается
-                    RectangleF br2 = new RectangleF(
-                        BtnRect.X + shrink, BtnRect.Y + shrink,
-                        BtnRect.Width - shrink * 2, BtnRect.Height - shrink * 2);
-                    using (SolidBrush bb = new SolidBrush(bc))
-                        g.FillEllipse(bb, br2);
-                    if (overBtn)
-                        using (Pen pn = new Pen(Color.FromArgb(120, acc), 1.2f))
-                            g.DrawEllipse(pn, br2);
-
-                    float cx = BtnRect.X + BtnRect.Width / 2f, cy = BtnRect.Y + BtnRect.Height / 2f;
-                    using (SolidBrush w = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
-                    {
-                        if (run)
-                        {
-                            g.FillRectangle(w, cx - 4.5f, cy - 6, 3.2f, 12);
-                            g.FillRectangle(w, cx + 1.3f, cy - 6, 3.2f, 12);
-                        }
-                        else
-                        {
-                            g.FillPolygon(w, new PointF[] {
-                                new PointF(cx - 4, cy - 6.5f),
-                                new PointF(cx + 6, cy),
-                                new PointF(cx - 4, cy + 6.5f) });
-                        }
-                    }
-
-                    // прогресс до 8 часов
-                    float frac = (float)Math.Min(1.0, app.TodayPub / 480.0);
-                    RectangleF tr = new RectangleF(16, WH - 11, WW - 32, 3);
-                    using (GraphicsPath tp = Skin.Round(tr, 1.5f))
-                    using (SolidBrush tb = new SolidBrush(Color.FromArgb(70, 90, 105, 140)))
-                        g.FillPath(tb, tp);
-                    if (frac > 0.005f)
-                    {
-                        RectangleF fr = new RectangleF(tr.X, tr.Y, tr.Width * frac, 3);
-                        using (GraphicsPath fp = Skin.Round(fr, 1.5f))
-                        using (LinearGradientBrush lg = new LinearGradientBrush(
-                            new RectangleF(tr.X, tr.Y, tr.Width, 3),
-                            frac >= 1f ? Skin.Green : Skin.A1,
-                            frac >= 1f ? Skin.A2 : Skin.A2, LinearGradientMode.Horizontal))
-                            g.FillPath(lg, fp);
-                    }
+                    SizeF sz = g.MeasureString(pct, Skin.F(7.5f, FontStyle.Bold),
+                        1000, StringFormat.GenericTypographic);
+                    g.DrawString(pct, Skin.F(7.5f, FontStyle.Bold), vb,
+                        WW - 18 - sz.Width, 8, StringFormat.GenericTypographic);
                 }
-                SetBitmap(buf);
+
+                RectangleF tr = Track;
+                using (GraphicsPath tp = Skin.Round(tr, 2.5f))
+                using (SolidBrush tb = new SolidBrush(Color.FromArgb((int)(90 * panelT), 90, 105, 140)))
+                    g.FillPath(tb, tp);
+
+                float t = AlphaToT(userAlpha);
+                RectangleF fr = new RectangleF(tr.X, tr.Y, tr.Width * t, tr.Height);
+                if (fr.Width > 1)
+                    using (GraphicsPath fp = Skin.Round(fr, 2.5f))
+                    using (LinearGradientBrush lg = new LinearGradientBrush(
+                        new RectangleF(tr.X, tr.Y, tr.Width, tr.Height),
+                        Color.FromArgb(a, Skin.A1), Color.FromArgb(a, Skin.A2),
+                        LinearGradientMode.Horizontal))
+                        g.FillPath(lg, fp);
+
+                float kx = tr.X + tr.Width * t;
+                float kr = draggingSlider ? 8f : 7f;
+                using (SolidBrush ks = new SolidBrush(Color.FromArgb((int)(70 * panelT), 0, 0, 0)))
+                    g.FillEllipse(ks, kx - kr, tr.Y + tr.Height / 2 - kr + 1, kr * 2, kr * 2);
+                using (SolidBrush kb = new SolidBrush(Color.FromArgb(a, 245, 248, 255)))
+                    g.FillEllipse(kb, kx - kr, tr.Y + tr.Height / 2 - kr, kr * 2, kr * 2);
             }
+
+            // --- стрелка раскрытия ---
+            {
+                Rectangle cr = ChevRect;
+                float cx = cr.X + cr.Width / 2f, cy = cr.Y + cr.Height / 2f;
+                int ca = overChev ? 235 : 130;
+                using (Pen cp = new Pen(Color.FromArgb(ca, Skin.Text), 1.6f))
+                {
+                    cp.StartCap = LineCap.Round; cp.EndCap = LineCap.Round;
+                    float dir = panelT > 0.5f ? -1f : 1f;   // раскрыто — стрелка вниз
+                    g.DrawLine(cp, cx - 4, cy + 2 * dir, cx, cy - 2 * dir);
+                    g.DrawLine(cp, cx, cy - 2 * dir, cx + 4, cy + 2 * dir);
+                }
+            }
+
+            // --- точка состояния ---
+            float k2 = run ? (float)(0.5 + 0.5 * Math.Sin(pulse)) : 1f;
+            float dr = run ? 5f + 2f * k2 : 5f;
+            if (run)
+                using (SolidBrush halo = new SolidBrush(Color.FromArgb((int)(70 * k2), acc)))
+                    g.FillEllipse(halo, 17 - dr - 4, oy + WHBase / 2f - dr - 4, (dr + 4) * 2, (dr + 4) * 2);
+            using (SolidBrush db = new SolidBrush(acc))
+                g.FillEllipse(db, 17 - 4.5f, oy + WHBase / 2f - 4.5f, 9, 9);
+
+            // --- время ---
+            string big = TrayApp.Fmt(app.TodayPub);
+            Font bf = Skin.F(19f, FontStyle.Bold);
+            using (LinearGradientBrush lg = new LinearGradientBrush(
+                new RectangleF(32, oy + 10, 110, 30), Color.FromArgb(250, 245, 248, 255),
+                run ? Color.FromArgb(250, Skin.A2) : Color.FromArgb(230, Skin.Muted),
+                LinearGradientMode.Horizontal))
+                g.DrawString(big, bf, lg, 31, oy + 11, StringFormat.GenericTypographic);
+
+            string sub = run || paused ? "сессия " + TrayApp.Fmt(app.SessionPub) : "остановлен";
+            using (SolidBrush sb = new SolidBrush(Color.FromArgb(190, Skin.Dim)))
+                g.DrawString(sub, Skin.F(7.5f, FontStyle.Regular), sb, 33, oy + 43,
+                    StringFormat.GenericTypographic);
+
+            // --- кнопка старт/пауза ---
+            Rectangle br = BtnRect;
+            Color bc = overBtn
+                ? (pressBtn ? Color.FromArgb(255, Skin.Card3) : Color.FromArgb(240, Skin.Card3))
+                : Color.FromArgb(150, Skin.Card2);
+            float shrink = pressBtn ? 2f : 0f;
+            RectangleF br2 = new RectangleF(br.X + shrink, br.Y + shrink,
+                br.Width - shrink * 2, br.Height - shrink * 2);
+            using (SolidBrush bb = new SolidBrush(bc)) g.FillEllipse(bb, br2);
+            if (overBtn)
+                using (Pen pn = new Pen(Color.FromArgb(120, acc), 1.2f)) g.DrawEllipse(pn, br2);
+
+            float bx = br.X + br.Width / 2f, by = br.Y + br.Height / 2f;
+            using (SolidBrush w = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
+            {
+                if (run)
+                {
+                    g.FillRectangle(w, bx - 4.5f, by - 6, 3.2f, 12);
+                    g.FillRectangle(w, bx + 1.3f, by - 6, 3.2f, 12);
+                }
+                else
+                    g.FillPolygon(w, new PointF[] {
+                        new PointF(bx - 4, by - 6.5f), new PointF(bx + 6, by),
+                        new PointF(bx - 4, by + 6.5f) });
+            }
+
+            // --- прогресс до 8 часов ---
+            float frac = (float)Math.Min(1.0, app.TodayPub / 480.0);
+            RectangleF tr2 = new RectangleF(16, oy + WHBase - 11, WW - 32, 3);
+            using (GraphicsPath tp = Skin.Round(tr2, 1.5f))
+            using (SolidBrush tb = new SolidBrush(Color.FromArgb(70, 90, 105, 140)))
+                g.FillPath(tb, tp);
+            if (frac > 0.005f)
+            {
+                RectangleF fr2 = new RectangleF(tr2.X, tr2.Y, tr2.Width * frac, 3);
+                using (GraphicsPath fp = Skin.Round(fr2, 1.5f))
+                using (LinearGradientBrush lg = new LinearGradientBrush(
+                    new RectangleF(tr2.X, tr2.Y, tr2.Width, 3),
+                    frac >= 1f ? Skin.Green : Skin.A1, Skin.A2, LinearGradientMode.Horizontal))
+                    g.FillPath(lg, fp);
+            }
+
+            Flush();
         }
 
         // ---------- слоёное окно ----------
+        // Поверхность создаётся один раз (DIB section) и переиспользуется.
+        // Раньше на каждый кадр вызывался GetHbitmap — это копия картинки
+        // и новый объект GDI восемь раз в секунду.
         [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
         [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
         [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
         [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
         [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO bmi,
+            uint usage, out IntPtr bits, IntPtr section, uint offset);
         [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr h, IntPtr dst,
             ref PT ppt, ref SZ psz, IntPtr src, ref PT pptSrc, int key, ref BLEND bl, int flags);
 
@@ -1642,33 +1919,89 @@ namespace WorkTimer
         [StructLayout(LayoutKind.Sequential)] struct SZ { public int W, H; }
         [StructLayout(LayoutKind.Sequential)]
         struct BLEND { public byte Op, Flags, Alpha, Format; }
-
-        void SetBitmap(Bitmap bmp)
+        [StructLayout(LayoutKind.Sequential)]
+        struct BITMAPINFOHEADER
         {
+            public uint biSize; public int biWidth, biHeight;
+            public ushort biPlanes, biBitCount;
+            public uint biCompression, biSizeImage;
+            public int biXPelsPerMeter, biYPelsPerMeter;
+            public uint biClrUsed, biClrImportant;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        struct BITMAPINFO { public BITMAPINFOHEADER h; public uint c0, c1, c2; }
+
+        IntPtr memDc, dib, oldBmp;
+
+        void EnsureSurface()
+        {
+            if (dib != IntPtr.Zero && buf != null && buf.Width == Width && buf.Height == Height)
+                return;
+            ReleaseSurface();
+
+            BITMAPINFO bi = new BITMAPINFO();
+            bi.h.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+            bi.h.biWidth = Width;
+            bi.h.biHeight = -Height;        // сверху вниз
+            bi.h.biPlanes = 1;
+            bi.h.biBitCount = 32;
+            bi.h.biCompression = 0;         // BI_RGB
+
             IntPtr screen = GetDC(IntPtr.Zero);
-            IntPtr mem = CreateCompatibleDC(screen);
-            IntPtr hbmp = IntPtr.Zero, old = IntPtr.Zero;
-            try
+            memDc = CreateCompatibleDC(screen);
+            IntPtr bits;
+            dib = CreateDIBSection(screen, ref bi, 0, out bits, IntPtr.Zero, 0);
+            ReleaseDC(IntPtr.Zero, screen);
+            if (dib == IntPtr.Zero) return;
+
+            oldBmp = SelectObject(memDc, dib);
+            buf = new Bitmap(Width, Height, Width * 4,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb, bits);
+            bufG = Graphics.FromImage(buf);
+        }
+
+        void ReleaseSurface()
+        {
+            if (bufG != null) { bufG.Dispose(); bufG = null; }
+            if (buf != null) { buf.Dispose(); buf = null; }
+            if (memDc != IntPtr.Zero)
             {
-                hbmp = bmp.GetHbitmap(Color.FromArgb(0));
-                old = SelectObject(mem, hbmp);
-                SZ sz; sz.W = bmp.Width; sz.H = bmp.Height;
-                PT src; src.X = 0; src.Y = 0;
-                PT pos; pos.X = Left; pos.Y = Top;
-                BLEND bl;
-                bl.Op = 0; bl.Flags = 0; bl.Format = 1; // AC_SRC_ALPHA
-                bl.Alpha = (byte)Math.Max(0, Math.Min(255, (int)(fadeT * 255)));
-                UpdateLayeredWindow(Handle, screen, ref pos, ref sz, mem, ref src, 0, ref bl, 2);
+                if (oldBmp != IntPtr.Zero) { SelectObject(memDc, oldBmp); oldBmp = IntPtr.Zero; }
+                DeleteDC(memDc); memDc = IntPtr.Zero;
             }
-            finally
-            {
-                ReleaseDC(IntPtr.Zero, screen);
-                if (hbmp != IntPtr.Zero) { SelectObject(mem, old); DeleteObject(hbmp); }
-                DeleteDC(mem);
-            }
+            if (dib != IntPtr.Zero) { DeleteObject(dib); dib = IntPtr.Zero; }
+        }
+
+        void Flush()
+        {
+            SZ sz; sz.W = Width; sz.H = Height;
+            PT src; src.X = 0; src.Y = 0;
+            PT pos; pos.X = Left; pos.Y = Top;
+            BLEND bl;
+            bl.Op = 0; bl.Flags = 0; bl.Format = 1;   // AC_SRC_ALPHA
+            double a = fadeT * userAlpha * 255;
+            bl.Alpha = (byte)Math.Max(0, Math.Min(255, (int)a));
+            // hdcDst = NULL — система сама возьмёт экранный контекст
+            UpdateLayeredWindow(Handle, IntPtr.Zero, ref pos, ref sz, memDc, ref src, 0, ref bl, 2);
         }
 
         // ---------- мышь ----------
+        bool InSlider(Point p)
+        {
+            if (panelT < 0.6f) return false;
+            RectangleF tr = Track;
+            return p.Y >= tr.Y - 12 && p.Y <= tr.Y + tr.Height + 12 &&
+                   p.X >= tr.X - 10 && p.X <= tr.Right + 10;
+        }
+
+        void SetAlphaFromX(int x)
+        {
+            RectangleF tr = Track;
+            float t = (x - tr.X) / tr.Width;
+            userAlpha = TToAlpha(t);
+            Render();
+        }
+
         protected override void OnMouseEnter(EventArgs e)
         {
             hover = true; Render(); base.OnMouseEnter(e);
@@ -1676,11 +2009,14 @@ namespace WorkTimer
 
         protected override void OnMouseLeave(EventArgs e)
         {
-            hover = false; overBtn = false; pressBtn = false; Render(); base.OnMouseLeave(e);
+            hover = false; overBtn = false; overChev = false; pressBtn = false;
+            Render(); base.OnMouseLeave(e);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
+            if (draggingSlider) { SetAlphaFromX(e.X); return; }
+
             if (armed)
             {
                 Point now = PointToScreen(e.Location);
@@ -1689,21 +2025,21 @@ namespace WorkTimer
                 if (dragging) Location = new Point(grabOrigin.X + dx, grabOrigin.Y + dy);
                 return;
             }
+
             bool ob = BtnRect.Contains(e.Location);
-            Cursor = ob ? Cursors.Hand : Cursors.SizeAll;
-            if (ob != overBtn) { overBtn = ob; Render(); }
+            bool oc = ChevRect.Contains(e.Location);
+            Cursor = (ob || oc || InSlider(e.Location)) ? Cursors.Hand : Cursors.SizeAll;
+            if (ob != overBtn || oc != overChev) { overBtn = ob; overChev = oc; Render(); }
             base.OnMouseMove(e);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
-            {
-                app.ShowMenuAt(PointToScreen(e.Location));
-                return;
-            }
+            if (e.Button == MouseButtons.Right) { app.ShowMenuAt(PointToScreen(e.Location)); return; }
             if (e.Button != MouseButtons.Left) return;
 
+            if (ChevRect.Contains(e.Location)) { ToggleExpand(); return; }
+            if (InSlider(e.Location)) { draggingSlider = true; SetAlphaFromX(e.X); return; }
             if (BtnRect.Contains(e.Location)) { pressBtn = true; Render(); return; }
 
             armed = true;
@@ -1715,6 +2051,13 @@ namespace WorkTimer
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            if (draggingSlider)
+            {
+                draggingSlider = false;
+                app.WidgetAlpha = userAlpha;
+                Render();
+                return;
+            }
             if (pressBtn)
             {
                 pressBtn = false;
@@ -1732,7 +2075,9 @@ namespace WorkTimer
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
-            if (!BtnRect.Contains(e.Location)) app.OpenMainPub();
+            if (!BtnRect.Contains(e.Location) && !ChevRect.Contains(e.Location) &&
+                !InSlider(e.Location))
+                app.OpenMainPub();
             base.OnMouseDoubleClick(e);
         }
 
@@ -1748,8 +2093,8 @@ namespace WorkTimer
             {
                 if (tick != null) { tick.Stop(); tick.Dispose(); tick = null; }
                 if (fadeIn != null) { fadeIn.Stop(); fadeIn.Dispose(); fadeIn = null; }
-                if (bufG != null) { bufG.Dispose(); bufG = null; }
-                if (buf != null) { buf.Dispose(); buf = null; }
+                if (panelAnim != null) { panelAnim.Stop(); panelAnim.Dispose(); panelAnim = null; }
+                ReleaseSurface();
             }
             base.Dispose(disposing);
         }
@@ -1784,6 +2129,445 @@ namespace WorkTimer
                 ? (e.Item.Selected ? Color.White : Skin.Text)
                 : Skin.Dim;
             base.OnRenderItemText(e);
+        }
+    }
+
+    // ================= ПОЛЗУНОК =================
+    class GSlider : Control
+    {
+        public float Value = 1f;                 // 0..1
+        public Action<float> Changed;
+        bool drag, hover;
+
+        public GSlider()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+            Height = 28;
+        }
+
+        RectangleF Track { get { return new RectangleF(9, Height / 2f - 2.5f, Width - 18, 5); } }
+
+        void SetFromX(int x)
+        {
+            RectangleF t = Track;
+            float v = (x - t.X) / t.Width;
+            Value = Math.Max(0f, Math.Min(1f, v));
+            if (Changed != null) Changed(Value);
+            Invalidate();
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { drag = true; SetFromX(e.X); base.OnMouseDown(e); }
+        protected override void OnMouseMove(MouseEventArgs e) { if (drag) SetFromX(e.X); base.OnMouseMove(e); }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            drag = false;
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush bg = new SolidBrush(BackColor)) g.FillRectangle(bg, ClientRectangle);
+
+            RectangleF t = Track;
+            using (GraphicsPath tp = Skin.Round(t, 2.5f))
+            using (SolidBrush tb = new SolidBrush(Skin.Card3))
+                g.FillPath(tb, tp);
+
+            RectangleF f = new RectangleF(t.X, t.Y, t.Width * Value, t.Height);
+            if (f.Width > 1)
+                using (GraphicsPath fp = Skin.Round(f, 2.5f))
+                using (LinearGradientBrush lg = new LinearGradientBrush(
+                    new RectangleF(t.X, t.Y, t.Width, t.Height), Skin.A1, Skin.A2,
+                    LinearGradientMode.Horizontal))
+                    g.FillPath(lg, fp);
+
+            float kx = t.X + t.Width * Value;
+            float kr = drag ? 9f : (hover ? 8.5f : 7.5f);
+            using (SolidBrush sh = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
+                g.FillEllipse(sh, kx - kr, t.Y + t.Height / 2 - kr + 1.5f, kr * 2, kr * 2);
+            using (SolidBrush kb = new SolidBrush(Color.FromArgb(245, 248, 255)))
+                g.FillEllipse(kb, kx - kr, t.Y + t.Height / 2 - kr, kr * 2, kr * 2);
+        }
+    }
+
+    // ================= НАСТРОЙКИ =================
+    class SettingsDialog : Form
+    {
+        readonly TrayApp app;
+        GButton bWidget, bHotkey, bAuto, bClose, bDone;
+        GSlider slider;
+
+        const int W = 420, H = 356;
+
+        public SettingsDialog(TrayApp owner)
+        {
+            app = owner;
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(W, H);
+            BackColor = Skin.Card;
+            ShowInTaskbar = false;
+            Font = Skin.F(9.5f, FontStyle.Regular);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer, true);
+
+            bClose = Mk(GButton.Kind.Icon, "✕", W - 44, 14, 28, 28);
+            bClose.Danger = true; bClose.Radius = 8;
+            bClose.Click += delegate { Close(); };
+
+            bWidget = Mk(GButton.Kind.Ghost, "", W - 140, 72, 116, 34);
+            bWidget.Click += delegate { app.ToggleWidgetPub(); Sync(); };
+
+            slider = new GSlider();
+            slider.BackColor = Skin.Card;
+            slider.SetBounds(20, 150, W - 40, 28);
+            slider.Changed += delegate(float v)
+            {
+                app.WidgetAlpha = 0.35 + v * 0.65;
+                app.RefreshWidgetAlpha();
+                Invalidate(new Rectangle(0, 118, W, 30));
+            };
+            Controls.Add(slider);
+
+            bHotkey = Mk(GButton.Kind.Ghost, "", W - 140, 198, 116, 34);
+            bHotkey.Click += delegate { app.SetHotkey(!app.HotkeyOn); Sync(); };
+
+            bAuto = Mk(GButton.Kind.Ghost, "", W - 140, 244, 116, 34);
+            bAuto.Click += delegate { app.ToggleAutostartPub(); Sync(); };
+
+            bDone = Mk(GButton.Kind.Primary, "Готово", 20, H - 52, 120, 36);
+            bDone.Font = Skin.F(9.5f, FontStyle.Bold);
+            bDone.Click += delegate { Close(); };
+
+            MouseDown += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left && e.Y < 56)
+                {
+                    ReleaseCapture();
+                    SendMessage(Handle, 0xA1, 2, 0);
+                }
+            };
+
+            KeyPreview = true;
+            KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); };
+            Sync();
+        }
+
+        [DllImport("user32.dll")] static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int m, int w, int l);
+
+        GButton Mk(GButton.Kind k, string text, int x, int y, int w, int h)
+        {
+            GButton b = new GButton();
+            b.Style = k;
+            b.Text = text;
+            b.ParentBg = Skin.Card;
+            b.ForeColor = Skin.Muted;
+            b.Radius = 11;
+            b.SetBounds(x, y, w, h);
+            Controls.Add(b);
+            return b;
+        }
+
+        void Mark(GButton b, bool on)
+        {
+            b.Text = on ? "включено" : "выключено";
+            b.ForeColor = on ? Skin.A2 : Skin.Dim;
+            b.Invalidate();
+        }
+
+        void Sync()
+        {
+            Mark(bWidget, app.WidgetOn);
+            Mark(bHotkey, app.HotkeyOn);
+            Mark(bAuto, app.AutostartOn);
+            slider.Value = (float)((app.WidgetAlpha - 0.35) / 0.65);
+            slider.Invalidate();
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush bg = new SolidBrush(Skin.Card)) g.FillRectangle(bg, ClientRectangle);
+            using (Pen p = new Pen(Skin.Card3, 1f))
+                g.DrawRectangle(p, 0, 0, W - 1, H - 1);
+            using (LinearGradientBrush lg = new LinearGradientBrush(
+                new Rectangle(0, 0, W, 3), Skin.A1, Skin.A2, LinearGradientMode.Horizontal))
+                g.FillRectangle(lg, 0, 0, W, 3);
+
+            TextRenderer.DrawText(g, "Настройки", Skin.F(13f, FontStyle.Bold),
+                new Rectangle(22, 18, 300, 28), Skin.Text,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+
+            Row(g, 72, "Виджет на экране", "маленькая плашка поверх окон");
+            TextRenderer.DrawText(g, "Прозрачность виджета", Skin.F(9.5f, FontStyle.Regular),
+                new Rectangle(22, 122, 260, 20), Skin.Text,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, Math.Round(app.WidgetAlpha * 100) + "%",
+                Skin.F(9.5f, FontStyle.Bold),
+                new Rectangle(W - 90, 122, 68, 20), Skin.A2,
+                TextFormatFlags.Right | TextFormatFlags.NoPadding);
+
+            Row(g, 198, "Ctrl + Alt + Space", "глобально: старт и пауза, не открывая окно");
+            Row(g, 244, "Запускать с Windows", "стартовать вместе с системой");
+
+            using (Pen p = new Pen(Color.FromArgb(32, 38, 54), 1f))
+            {
+                g.DrawLine(p, 20, 112, W - 20, 112);
+                g.DrawLine(p, 20, 188, W - 20, 188);
+                g.DrawLine(p, 20, H - 66, W - 20, H - 66);
+            }
+        }
+
+        void Row(Graphics g, int y, string title, string hint)
+        {
+            TextRenderer.DrawText(g, title, Skin.F(9.5f, FontStyle.Regular),
+                new Rectangle(22, y + 2, 260, 20), Skin.Text,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, hint, Skin.F(8f, FontStyle.Regular),
+                new Rectangle(22, y + 19, 260, 18), Skin.Dim,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+        }
+    }
+
+    // ================= ВЫБОР ПЕРИОДА =================
+    class RangeDialog : Form
+    {
+        DateTime from, to;
+        public DateTime From { get { return from; } }
+        public DateTime To { get { return to; } }
+        DateTime view;
+        DateTime? pickFrom;
+        bool picking;
+        int hoverDay = -1;
+
+        GButton bPrev, bNext, bClose, bGo, bCancel;
+        GButton[] presets;
+
+        const int W = 372, H = 476;
+        const int CellW = 46, CellH = 34;
+        static readonly Point Grid = new Point(20, 164);
+
+        public RangeDialog(DateTime from, DateTime to)
+        {
+            this.from = from; this.to = to;
+            view = new DateTime(to.Year, to.Month, 1);
+
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(W, H);
+            BackColor = Skin.Card;
+            ShowInTaskbar = false;
+            Font = Skin.F(9.5f, FontStyle.Regular);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer, true);
+
+            bClose = Mk(GButton.Kind.Icon, "✕", W - 44, 14, 28, 28, 8);
+            bClose.Danger = true;
+            bClose.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
+
+            bPrev = Mk(GButton.Kind.Icon, "‹", 20, 68, 30, 30, 9);
+            bPrev.Font = Skin.F(14f, FontStyle.Bold);
+            bPrev.Click += delegate { view = view.AddMonths(-1); Invalidate(); };
+
+            bNext = Mk(GButton.Kind.Icon, "›", 54, 68, 30, 30, 9);
+            bNext.Font = Skin.F(14f, FontStyle.Bold);
+            bNext.Click += delegate { view = view.AddMonths(1); Invalidate(); };
+
+            string[] names = { "Этот месяц", "Прошлый", "Этот год", "Всё время" };
+            presets = new GButton[4];
+            int px = 20;
+            for (int i = 0; i < 4; i++)
+            {
+                int w = i == 0 ? 86 : (i == 1 ? 74 : (i == 2 ? 72 : 82));
+                GButton b = Mk(GButton.Kind.Ghost, names[i], px, 106, w, 30, 10);
+                b.Font = Skin.F(8.5f, FontStyle.Regular);
+                int idx = i;
+                b.Click += delegate { Preset(idx); };
+                presets[i] = b;
+                px += w + 5;
+            }
+
+            bGo = Mk(GButton.Kind.Primary, "Экспорт", W - 150, H - 54, 130, 38, 12);
+            bGo.Font = Skin.F(9.5f, FontStyle.Bold);
+            bGo.Click += delegate { DialogResult = DialogResult.OK; Close(); };
+
+            bCancel = Mk(GButton.Kind.Ghost, "Отмена", 20, H - 54, 110, 38, 12);
+            bCancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
+
+            MouseDown += OnDown;
+            MouseMove += OnMove;
+            MouseLeave += delegate { if (hoverDay != -1) { hoverDay = -1; Invalidate(); } };
+            KeyPreview = true;
+            KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); }
+                if (e.KeyCode == Keys.Enter) { DialogResult = DialogResult.OK; Close(); }
+            };
+        }
+
+        [DllImport("user32.dll")] static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int m, int w, int l);
+
+        GButton Mk(GButton.Kind k, string text, int x, int y, int w, int h, float rad)
+        {
+            GButton b = new GButton();
+            b.Style = k; b.Text = text; b.ParentBg = Skin.Card;
+            b.ForeColor = Skin.Muted; b.Radius = rad;
+            b.SetBounds(x, y, w, h);
+            Controls.Add(b);
+            return b;
+        }
+
+        void Preset(int i)
+        {
+            DateTime now = DateTime.Now.Date;
+            if (i == 0) { from = new DateTime(now.Year, now.Month, 1); to = from.AddMonths(1).AddDays(-1); }
+            else if (i == 1)
+            {
+                DateTime m = new DateTime(now.Year, now.Month, 1).AddMonths(-1);
+                from = m; to = m.AddMonths(1).AddDays(-1);
+            }
+            else if (i == 2) { from = new DateTime(now.Year, 1, 1); to = new DateTime(now.Year, 12, 31); }
+            else { from = new DateTime(2000, 1, 1); to = now; }
+            view = new DateTime(to.Year, to.Month, 1);
+            picking = false; pickFrom = null;
+            Invalidate();
+        }
+
+        // первый день сетки — понедельник недели, в которой 1-е число
+        DateTime GridStart()
+        {
+            DateTime first = new DateTime(view.Year, view.Month, 1);
+            int dow = ((int)first.DayOfWeek + 6) % 7;      // Пн = 0
+            return first.AddDays(-dow);
+        }
+
+        int CellAt(Point p)
+        {
+            int cx = (p.X - Grid.X) / CellW;
+            int cy = (p.Y - Grid.Y) / CellH;
+            if (cx < 0 || cx > 6 || cy < 0 || cy > 5) return -1;
+            if (p.X < Grid.X || p.Y < Grid.Y) return -1;
+            return cy * 7 + cx;
+        }
+
+        void OnMove(object s, MouseEventArgs e)
+        {
+            int c = CellAt(e.Location);
+            if (c != hoverDay) { hoverDay = c; Invalidate(); }
+        }
+
+        void OnDown(object s, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && e.Y < 56)
+            {
+                ReleaseCapture();
+                SendMessage(Handle, 0xA1, 2, 0);
+                return;
+            }
+            int c = CellAt(e.Location);
+            if (c < 0) return;
+            DateTime d = GridStart().AddDays(c);
+
+            if (!picking) { pickFrom = d; from = d; to = d; picking = true; }
+            else
+            {
+                DateTime a = pickFrom.Value;
+                from = d < a ? d : a;
+                to = d < a ? a : d;
+                picking = false;
+            }
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush bg = new SolidBrush(Skin.Card)) g.FillRectangle(bg, ClientRectangle);
+            using (Pen p = new Pen(Skin.Card3, 1f)) g.DrawRectangle(p, 0, 0, W - 1, H - 1);
+            using (LinearGradientBrush lg = new LinearGradientBrush(
+                new Rectangle(0, 0, W, 3), Skin.A1, Skin.A2, LinearGradientMode.Horizontal))
+                g.FillRectangle(lg, 0, 0, W, 3);
+
+            CultureInfo ru = CultureInfo.GetCultureInfo("ru-RU");
+
+            TextRenderer.DrawText(g, "Экспорт за период", Skin.F(13f, FontStyle.Bold),
+                new Rectangle(22, 18, 300, 28), Skin.Text,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+
+            TextRenderer.DrawText(g, ru.TextInfo.ToTitleCase(view.ToString("MMMM yyyy", ru)),
+                Skin.F(11f, FontStyle.Bold), new Rectangle(96, 68, 200, 30), Skin.Text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+            string[] wd = { "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс" };
+            for (int i = 0; i < 7; i++)
+                TextRenderer.DrawText(g, wd[i], Skin.F(8f, FontStyle.Bold),
+                    new Rectangle(Grid.X + i * CellW, Grid.Y - 20, CellW, 16),
+                    i >= 5 ? Skin.Rose : Skin.Dim,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding);
+
+            DateTime start = GridStart();
+            for (int i = 0; i < 42; i++)
+            {
+                DateTime d = start.AddDays(i);
+                int cx = Grid.X + (i % 7) * CellW;
+                int cy = Grid.Y + (i / 7) * CellH;
+                bool inMonth = d.Month == view.Month;
+                bool inRange = d.Date >= from.Date && d.Date <= to.Date;
+                bool edge = d.Date == from.Date || d.Date == to.Date;
+
+                RectangleF cell = new RectangleF(cx + 2, cy + 2, CellW - 4, CellH - 4);
+                if (inRange && !edge)
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(38, Skin.A2)))
+                    using (GraphicsPath p = Skin.Round(cell, 8))
+                        g.FillPath(b, p);
+                if (edge)
+                    using (GraphicsPath p = Skin.Round(cell, 9))
+                    using (LinearGradientBrush lg = new LinearGradientBrush(
+                        cell, Skin.A1, Skin.A2, LinearGradientMode.Horizontal))
+                        g.FillPath(lg, p);
+                else if (i == hoverDay)
+                    using (SolidBrush b = new SolidBrush(Skin.Card2))
+                    using (GraphicsPath p = Skin.Round(cell, 8))
+                        g.FillPath(b, p);
+
+                if (d.Date == DateTime.Now.Date && !edge)
+                    using (Pen p = new Pen(Skin.A2, 1.2f))
+                    using (GraphicsPath gp = Skin.Round(cell, 8))
+                        g.DrawPath(p, gp);
+
+                Color tc = edge ? Color.White
+                    : (!inMonth ? Color.FromArgb(60, 68, 88)
+                    : (d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday
+                       ? Skin.Rose : Skin.Text));
+                TextRenderer.DrawText(g, d.Day.ToString(),
+                    Skin.F(9.5f, edge ? FontStyle.Bold : FontStyle.Regular),
+                    new Rectangle(cx, cy, CellW, CellH), tc,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.NoPadding);
+            }
+
+            int days = (int)(to.Date - from.Date).TotalDays + 1;
+            string info = from.ToString("dd.MM.yyyy") + "  —  " + to.ToString("dd.MM.yyyy") +
+                          "   (" + days + " дн.)";
+            TextRenderer.DrawText(g, info, Skin.F(9.5f, FontStyle.Bold),
+                new Rectangle(20, H - 96, W - 40, 22), Skin.A2,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g,
+                picking ? "выбери вторую дату" : "клик — начало, второй клик — конец",
+                Skin.F(8f, FontStyle.Regular),
+                new Rectangle(20, H - 76, W - 40, 18), Skin.Dim,
+                TextFormatFlags.Left | TextFormatFlags.NoPadding);
         }
     }
 
