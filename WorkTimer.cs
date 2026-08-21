@@ -52,7 +52,21 @@ namespace WorkTimer
         public static readonly Color Amber = Color.FromArgb(250, 176, 60);
         public static readonly Color Rose = Color.FromArgb(244, 96, 128);
 
-        public static Font F(float size, FontStyle st) { return new Font("Segoe UI", size, st); }
+        // шрифты живут всё время работы программы: перерисовка идёт до 20 раз
+        // в секунду, создавать их каждый кадр — лишняя нагрузка на GDI
+        static readonly Dictionary<string, Font> fonts = new Dictionary<string, Font>();
+
+        public static Font F(float size, FontStyle st)
+        {
+            string k = size.ToString("0.##", CultureInfo.InvariantCulture) + "/" + (int)st;
+            Font f;
+            if (!fonts.TryGetValue(k, out f))
+            {
+                f = new Font("Segoe UI", size, st);
+                fonts[k] = f;
+            }
+            return f;
+        }
 
         public static GraphicsPath Round(RectangleF r, float rad)
         {
@@ -65,6 +79,24 @@ namespace WorkTimer
             p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
             p.CloseFigure();
             return p;
+        }
+
+        // плавное затухание к концу — для всех анимаций
+        public static float EaseOut(float t)
+        {
+            if (t <= 0) return 0;
+            if (t >= 1) return 1;
+            float u = 1 - t;
+            return 1 - u * u * u;
+        }
+
+        // шаг к цели; возвращает false в done, пока не доехали
+        public static float Approach(float cur, float target, float k, ref bool done)
+        {
+            float d = target - cur;
+            if (Math.Abs(d) < 0.006f) return target;
+            done = false;
+            return cur + d * k;
         }
 
         public static Color Mix(Color a, Color b, float t)
@@ -86,6 +118,8 @@ namespace WorkTimer
         public float Radius = 12f;
         public bool Danger = false;
         bool hover, press;
+        float hoverT, pressT;                    // сглаженные состояния 0..1
+        System.Windows.Forms.Timer anim;
 
         public GButton()
         {
@@ -96,10 +130,34 @@ namespace WorkTimer
             Font = Skin.F(9.5f, FontStyle.Regular);
         }
 
-        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseDown(MouseEventArgs e) { press = true; Invalidate(); base.OnMouseDown(e); }
-        protected override void OnMouseUp(MouseEventArgs e) { press = false; Invalidate(); base.OnMouseUp(e); }
+        void Animate()
+        {
+            if (anim == null)
+            {
+                anim = new System.Windows.Forms.Timer();
+                anim.Interval = 16;
+                anim.Tick += delegate
+                {
+                    bool done = true;
+                    hoverT = Skin.Approach(hoverT, hover ? 1f : 0f, 0.24f, ref done);
+                    pressT = Skin.Approach(pressT, press ? 1f : 0f, 0.40f, ref done);
+                    Invalidate();
+                    if (done) anim.Stop();
+                };
+            }
+            anim.Start();
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Animate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; press = false; Animate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { press = true; Animate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { press = false; Animate(); base.OnMouseUp(e); }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && anim != null) { anim.Stop(); anim.Dispose(); anim = null; }
+            base.Dispose(disposing);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -112,32 +170,35 @@ namespace WorkTimer
             {
                 if (Style == Kind.Primary)
                 {
-                    Color ca = A, cb = B;
-                    if (press) { ca = Skin.Mix(ca, Color.Black, 0.18f); cb = Skin.Mix(cb, Color.Black, 0.18f); }
-                    else if (hover) { ca = Skin.Mix(ca, Color.White, 0.12f); cb = Skin.Mix(cb, Color.White, 0.12f); }
+                    Color ca = Skin.Mix(Skin.Mix(A, Color.White, 0.14f * hoverT), Color.Black, 0.20f * pressT);
+                    Color cb = Skin.Mix(Skin.Mix(B, Color.White, 0.14f * hoverT), Color.Black, 0.20f * pressT);
                     using (LinearGradientBrush lg = new LinearGradientBrush(
                         new Rectangle(0, 0, Width, Height), ca, cb, LinearGradientMode.Horizontal))
                         g.FillPath(lg, p);
-                    if (hover)
-                        using (Pen gl = new Pen(Color.FromArgb(90, Color.White), 1f)) g.DrawPath(gl, p);
+                    if (hoverT > 0.01f)
+                        using (Pen gl = new Pen(Color.FromArgb((int)(110 * hoverT), Color.White), 1.2f))
+                            g.DrawPath(gl, p);
                 }
                 else if (Style == Kind.Ghost)
                 {
-                    Color f = press ? Skin.Card3 : (hover ? Skin.Card2 : Color.FromArgb(26, 31, 44));
+                    Color f = Skin.Mix(Skin.Mix(Color.FromArgb(26, 31, 44), Skin.Card2, hoverT),
+                                       Skin.Card3, pressT);
                     using (SolidBrush sb = new SolidBrush(f)) g.FillPath(sb, p);
-                    using (Pen pn = new Pen(hover ? Skin.Card3 : Skin.Line, 1f)) g.DrawPath(pn, p);
+                    using (Pen pn = new Pen(Skin.Mix(Skin.Line, Skin.Card3, hoverT), 1f)) g.DrawPath(pn, p);
                 }
                 else
                 {
-                    if (hover)
-                        using (SolidBrush sb = new SolidBrush(Danger
-                            ? Color.FromArgb(220, 60, 80) : Skin.Card2))
+                    if (hoverT > 0.01f)
+                    {
+                        Color target = Danger ? Color.FromArgb(220, 60, 80) : Skin.Card2;
+                        using (SolidBrush sb = new SolidBrush(Skin.Mix(ParentBg, target, hoverT)))
                             g.FillPath(sb, p);
+                    }
                 }
             }
 
             Color tc = Style == Kind.Primary ? Color.White
-                : (hover ? (Danger ? Color.White : Skin.Text) : ForeColor);
+                : Skin.Mix(ForeColor, Danger ? Color.White : Skin.Text, hoverT);
             TextRenderer.DrawText(g, Text, Font, ClientRectangle, tc,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
@@ -165,6 +226,11 @@ namespace WorkTimer
         int hoverIdx = -1;
         const int RowH = 30;
 
+        float[] prog;                    // прогресс появления каждой строки
+        DateTime animStart;
+        string lastKey = "";
+        System.Windows.Forms.Timer anim;
+
         public DayList()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
@@ -179,9 +245,58 @@ namespace WorkTimer
 
         public void SetRows(List<DayRow> rows, double scale)
         {
+            // строки перерисовываются раз в секунду — анимируем только когда
+            // состав списка сменился (переключили месяц, появился новый день)
+            string key = rows.Count > 0
+                ? rows[0].Day.ToString("yyyy-MM") + "/" + rows.Count
+                : "empty";
+            bool fresh = key != lastKey;
+            lastKey = key;
+
             Rows = rows; BarScale = scale;
             if (scroll > MaxScroll) scroll = MaxScroll;
+
+            if (fresh)
+            {
+                prog = new float[rows.Count];
+                animStart = DateTime.Now;
+                StartAnim();
+            }
+            else if (prog == null || prog.Length != rows.Count)
+            {
+                prog = new float[rows.Count];
+                for (int i = 0; i < prog.Length; i++) prog[i] = 1f;
+            }
             Invalidate();
+        }
+
+        void StartAnim()
+        {
+            if (anim == null)
+            {
+                anim = new System.Windows.Forms.Timer();
+                anim.Interval = 16;
+                anim.Tick += delegate
+                {
+                    double el = (DateTime.Now - animStart).TotalSeconds;
+                    bool all = true;
+                    for (int i = 0; i < prog.Length; i++)
+                    {
+                        float t = (float)((el - i * 0.035) / 0.42);
+                        prog[i] = Skin.EaseOut(t);
+                        if (prog[i] < 1f) all = false;
+                    }
+                    Invalidate();
+                    if (all) anim.Stop();
+                };
+            }
+            anim.Start();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && anim != null) { anim.Stop(); anim.Dispose(); anim = null; }
+            base.Dispose(disposing);
         }
 
         protected override void OnMouseEnter(EventArgs e)
@@ -247,7 +362,9 @@ namespace WorkTimer
             for (int i = first; i <= last; i++)
             {
                 DayRow r = Rows[i];
-                int y = i * RowH - scroll;
+                float pr = (prog != null && i < prog.Length) ? prog[i] : 1f;
+                if (pr <= 0.001f) continue;
+                int y = i * RowH - scroll + (int)((1f - pr) * 10);   // подъезжает снизу
 
                 if (i == hoverIdx)
                     using (SolidBrush hb = new SolidBrush(Color.FromArgb(28, 33, 47)))
@@ -259,7 +376,8 @@ namespace WorkTimer
                     using (GraphicsPath ap = Skin.Round(new RectangleF(0, y + 8, 3, RowH - 16), 1.5f))
                         g.FillPath(ab, ap);
 
-                Color dc = r.Weekend ? Skin.Rose : Skin.Text;
+                // GDI-текст не умеет альфу, поэтому «проявляем» цветом от фона
+                Color dc = Skin.Mix(BackColor, r.Weekend ? Skin.Rose : Skin.Text, pr);
                 TextRenderer.DrawText(g, r.Day.ToString("dd.MM"),
                     Skin.F(9.5f, r.IsToday ? FontStyle.Bold : FontStyle.Regular),
                     new Rectangle(12, y, 56, RowH), dc,
@@ -267,7 +385,8 @@ namespace WorkTimer
 
                 TextRenderer.DrawText(g, ru.TextInfo.ToTitleCase(r.Day.ToString("ddd", ru)),
                     Skin.F(8.5f, FontStyle.Regular),
-                    new Rectangle(66, y, 48, RowH), r.Weekend ? Skin.Rose : Skin.Dim,
+                    new Rectangle(66, y, 48, RowH),
+                    Skin.Mix(BackColor, r.Weekend ? Skin.Rose : Skin.Dim, pr),
                     TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
                 RectangleF track = new RectangleF(barX, y + RowH / 2f - 3.5f, barW, 7);
@@ -277,7 +396,7 @@ namespace WorkTimer
 
                 double frac = BarScale > 0 ? r.Minutes / BarScale : 0;
                 if (frac > 1) frac = 1;
-                float w = (float)(barW * frac);
+                float w = (float)(barW * frac) * pr;   // полоска вырастает
                 if (w > 3)
                 {
                     RectangleF fill = new RectangleF(barX, track.Y, w, 7);
@@ -290,7 +409,7 @@ namespace WorkTimer
                 string hrs = TrayApp.Fmt(r.Minutes) + (r.Manual ? " *" : "");
                 TextRenderer.DrawText(g, hrs, Skin.F(9.5f, FontStyle.Bold),
                     new Rectangle(Width - 78, y, 66, RowH),
-                    r.IsToday ? Skin.A2 : Skin.Text,
+                    Skin.Mix(BackColor, r.IsToday ? Skin.A2 : Skin.Text, pr),
                     TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             }
 
@@ -426,6 +545,12 @@ namespace WorkTimer
         DateTime lastSave = DateTime.Now;
         int lastSecond = -1;
         float pulse = 0;
+        float sheen = 0;              // бегущий блик по карточке
+        float popT = 0;               // «подскок» цифр при смене минуты
+        string lastBig = "";
+        System.Windows.Forms.Timer fade;
+        float fadeT = 0, fadeTarget = 0;
+        bool fadeHide = false;
 
         NotifyIcon tray;
         ContextMenuStrip menu;
@@ -735,6 +860,26 @@ namespace WorkTimer
 
                 if (running)
                 {
+                    // бегущий световой блик
+                    float bw = HeroRect.Width * 0.30f;
+                    float sx = HeroRect.X - bw + (sheen - (float)Math.Floor(sheen)) * (HeroRect.Width + bw * 2);
+                    Region old = g.Clip;
+                    g.SetClip(hp);
+                    using (LinearGradientBrush lb = new LinearGradientBrush(
+                        new RectangleF(sx, HeroRect.Y, bw, HeroRect.Height),
+                        Color.Transparent, Color.Transparent, LinearGradientMode.Horizontal))
+                    {
+                        ColorBlend cb = new ColorBlend(3);
+                        cb.Colors = new Color[] {
+                            Color.FromArgb(0, 255, 255, 255),
+                            Color.FromArgb(14, 255, 255, 255),
+                            Color.FromArgb(0, 255, 255, 255) };
+                        cb.Positions = new float[] { 0f, 0.5f, 1f };
+                        lb.InterpolationColors = cb;
+                        g.FillRectangle(lb, sx, HeroRect.Y, bw, HeroRect.Height);
+                    }
+                    g.Clip = old;
+
                     int a = (int)(40 + 45 * (1 + Math.Sin(pulse)) / 2);
                     using (Pen glow = new Pen(Color.FromArgb(a, Skin.Green), 2f)) g.DrawPath(glow, hp);
                 }
@@ -762,13 +907,26 @@ namespace WorkTimer
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
 
             string big = Fmt(TodayMinutes());
-            using (Font bf = new Font("Segoe UI", 42f, FontStyle.Bold))
             {
+                Font bf = Skin.F(42f, FontStyle.Bold);
                 Size bs = TextRenderer.MeasureText(g, big, bf, Size.Empty, TextFormatFlags.NoPadding);
                 Rectangle br = new Rectangle(HeroRect.X + 20, HeroRect.Y + 50, bs.Width + 10, 66);
+
+                // короткий «подскок» в момент смены минуты
+                GraphicsState gs = null;
+                if (popT > 0.001f)
+                {
+                    float sc = 1f + 0.05f * Skin.EaseOut(popT);
+                    float px = br.X, py = br.Y + 33;
+                    gs = g.Save();
+                    g.TranslateTransform(px, py);
+                    g.ScaleTransform(sc, sc);
+                    g.TranslateTransform(-px, -py);
+                }
                 using (LinearGradientBrush lg = new LinearGradientBrush(
                     br, Skin.Text, running ? Skin.A2 : Skin.Muted, LinearGradientMode.Horizontal))
                     g.DrawString(big, bf, lg, br.X, br.Y, StringFormat.GenericTypographic);
+                if (gs != null) g.Restore(gs);
             }
             TextRenderer.DrawText(g, "часов сегодня", Skin.F(8.5f, FontStyle.Regular),
                 new Rectangle(HeroRect.X + 24, HeroRect.Y + 120, 200, 18), Skin.Dim,
@@ -796,8 +954,8 @@ namespace WorkTimer
             TextRenderer.DrawText(g, "ИТОГО ЗА МЕСЯЦ", Skin.F(7.5f, FontStyle.Bold),
                 new Rectangle(MonthRect.Right - 200, MonthRect.Y + 14, 186, 14), Skin.Dim,
                 TextFormatFlags.Right | TextFormatFlags.NoPadding);
-            using (Font tf = new Font("Segoe UI", 17f, FontStyle.Bold))
             {
+                Font tf = Skin.F(17f, FontStyle.Bold);
                 Size ts = TextRenderer.MeasureText(g, monthTotal, tf, Size.Empty, TextFormatFlags.NoPadding);
                 Rectangle tr = new Rectangle(MonthRect.Right - 16 - ts.Width, MonthRect.Y + 28, ts.Width + 6, 28);
                 using (LinearGradientBrush lg = new LinearGradientBrush(
@@ -836,9 +994,12 @@ namespace WorkTimer
 
         void ToggleWindow()
         {
-            if (Visible && WindowState != FormWindowState.Minimized) HideWindow();
+            if (Visible && WindowState != FormWindowState.Minimized && !fadeHide) HideWindow();
             else
             {
+                fadeHide = false;
+                fadeT = 0;
+                Opacity = 0;
                 Show();
                 ShowInTaskbar = true;
                 WindowState = FormWindowState.Normal;
@@ -846,16 +1007,46 @@ namespace WorkTimer
                 UpdateAll();
                 Activate();
                 BringToFront();
+                FadeTo(1f, false);
             }
         }
 
         void HideWindow()
         {
-            Hide();
-            ShowInTaskbar = false;
-            timer.Interval = 1000;
-            UpdateTrayText();
-            TrimMemory();
+            if (!Visible) return;
+            FadeTo(0f, true);
+        }
+
+        void FadeTo(float target, bool hideAfter)
+        {
+            fadeTarget = target;
+            fadeHide = hideAfter;
+            if (fade == null)
+            {
+                fade = new System.Windows.Forms.Timer();
+                fade.Interval = 15;
+                fade.Tick += delegate
+                {
+                    bool done = true;
+                    fadeT = Skin.Approach(fadeT, fadeTarget, 0.28f, ref done);
+                    try { Opacity = fadeT; } catch { }
+                    if (done)
+                    {
+                        fade.Stop();
+                        if (fadeHide)
+                        {
+                            fadeHide = false;
+                            Hide();
+                            ShowInTaskbar = false;
+                            timer.Interval = 1000;
+                            Opacity = 1;      // чтобы следующий показ начинался чисто
+                            UpdateTrayText();
+                            TrimMemory();
+                        }
+                    }
+                };
+            }
+            fade.Start();
         }
 
         // ---------- логика ----------
@@ -964,7 +1155,10 @@ namespace WorkTimer
 
             if (Visible)
             {
-                if (Running) { pulse += 0.12f; Invalidate(HeroRect); }
+                bool heroLive = false;
+                if (Running) { pulse += 0.12f; sheen += 0.014f; heroLive = true; }
+                if (popT > 0) { popT -= 0.055f; if (popT < 0) popT = 0; heroLive = true; }
+                if (heroLive) Invalidate(HeroRect);
                 if (DateTime.Now.Second != lastSecond)
                 {
                     lastSecond = DateTime.Now.Second;
@@ -1080,8 +1274,11 @@ namespace WorkTimer
             {
                 DateTime day = new DateTime(viewMonth.Year, viewMonth.Month, d);
                 double m = map.ContainsKey(day) ? map[day] : 0;
-                if (m <= 0) continue;
-                total += m; worked++;
+                bool today = day.Date == DateTime.Now.Date;
+                // сегодняшний день показываем всегда — иначе в пустой день
+                // нельзя попасть двойным кликом и вписать часы вручную
+                if (m <= 0 && !today) continue;
+                if (m > 0) { total += m; worked++; }
                 if (m > max) max = m;
                 DayRow r = new DayRow();
                 r.Day = day;
@@ -1093,6 +1290,11 @@ namespace WorkTimer
             }
 
             dayList.SetRows(rows, max);
+
+            string big = Fmt(TodayMinutes());
+            if (lastBig.Length > 0 && big != lastBig) popT = 1f;
+            lastBig = big;
+
             monthTotal = Fmt(total);
             statsLine = string.Format("{0} дн.   ·   в среднем {1}   ·   {2} ч. десятичных",
                 worked, Fmt(worked > 0 ? total / worked : 0),
@@ -1239,6 +1441,8 @@ namespace WorkTimer
         Point grabScreen, grabOrigin;
         Bitmap buf;        // переиспользуемый холст — чтобы не мусорить каждым кадром
         Graphics bufG;
+        float fadeT = 0;   // плавное появление
+        System.Windows.Forms.Timer fadeIn;
         float pulse = 0;
         string lastKey = "";
         System.Windows.Forms.Timer tick;
@@ -1277,7 +1481,21 @@ namespace WorkTimer
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            fadeT = 0;
             Render();
+            if (fadeIn == null)
+            {
+                fadeIn = new System.Windows.Forms.Timer();
+                fadeIn.Interval = 15;
+                fadeIn.Tick += delegate
+                {
+                    bool done = true;
+                    fadeT = Skin.Approach(fadeT, 1f, 0.26f, ref done);
+                    Render();
+                    if (done) fadeIn.Stop();
+                };
+            }
+            fadeIn.Start();
         }
 
         void Beat()
@@ -1341,7 +1559,7 @@ namespace WorkTimer
 
                     // время
                     string big = TrayApp.Fmt(app.TodayPub);
-                    using (Font bf = new Font("Segoe UI", 19f, FontStyle.Bold))
+                    Font bf = Skin.F(19f, FontStyle.Bold);
                     using (LinearGradientBrush lg = new LinearGradientBrush(
                         new RectangleF(32, 10, 110, 30), Color.FromArgb(250, 245, 248, 255),
                         run ? Color.FromArgb(250, Skin.A2) : Color.FromArgb(230, Skin.Muted),
@@ -1351,7 +1569,7 @@ namespace WorkTimer
                     string sub = run || paused
                         ? "сессия " + TrayApp.Fmt(app.SessionPub)
                         : "остановлен";
-                    using (Font sf = new Font("Segoe UI", 7.5f, FontStyle.Regular))
+                    Font sf = Skin.F(7.5f, FontStyle.Regular);
                     using (SolidBrush sb = new SolidBrush(Color.FromArgb(190, Skin.Dim)))
                         g.DrawString(sub, sf, sb, 33, 43, StringFormat.GenericTypographic);
 
@@ -1359,11 +1577,15 @@ namespace WorkTimer
                     Color bc = overBtn
                         ? (pressBtn ? Color.FromArgb(255, Skin.Card3) : Color.FromArgb(240, Skin.Card3))
                         : Color.FromArgb(150, Skin.Card2);
+                    float shrink = pressBtn ? 2f : 0f;      // кнопка чуть вдавливается
+                    RectangleF br2 = new RectangleF(
+                        BtnRect.X + shrink, BtnRect.Y + shrink,
+                        BtnRect.Width - shrink * 2, BtnRect.Height - shrink * 2);
                     using (SolidBrush bb = new SolidBrush(bc))
-                        g.FillEllipse(bb, BtnRect);
+                        g.FillEllipse(bb, br2);
                     if (overBtn)
                         using (Pen pn = new Pen(Color.FromArgb(120, acc), 1.2f))
-                            g.DrawEllipse(pn, BtnRect);
+                            g.DrawEllipse(pn, br2);
 
                     float cx = BtnRect.X + BtnRect.Width / 2f, cy = BtnRect.Y + BtnRect.Height / 2f;
                     using (SolidBrush w = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
@@ -1431,7 +1653,8 @@ namespace WorkTimer
                 PT src; src.X = 0; src.Y = 0;
                 PT pos; pos.X = Left; pos.Y = Top;
                 BLEND bl;
-                bl.Op = 0; bl.Flags = 0; bl.Alpha = 255; bl.Format = 1; // AC_SRC_ALPHA
+                bl.Op = 0; bl.Flags = 0; bl.Format = 1; // AC_SRC_ALPHA
+                bl.Alpha = (byte)Math.Max(0, Math.Min(255, (int)(fadeT * 255)));
                 UpdateLayeredWindow(Handle, screen, ref pos, ref sz, mem, ref src, 0, ref bl, 2);
             }
             finally
@@ -1521,6 +1744,7 @@ namespace WorkTimer
             if (disposing)
             {
                 if (tick != null) { tick.Stop(); tick.Dispose(); tick = null; }
+                if (fadeIn != null) { fadeIn.Stop(); fadeIn.Dispose(); fadeIn = null; }
                 if (bufG != null) { bufG.Dispose(); bufG = null; }
                 if (buf != null) { buf.Dispose(); buf = null; }
             }
