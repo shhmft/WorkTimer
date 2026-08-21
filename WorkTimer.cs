@@ -716,7 +716,10 @@ namespace WorkTimer
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(W, H);
-            ShowInTaskbar = false;
+            // ShowInTaskbar НЕ переключаем на лету: WinForms при смене этого
+            // свойства пересоздаёт окно, а свёрнутое безрамочное окно без кнопки
+            // на панели задач превращается в огрызок в углу экрана
+            ShowInTaskbar = true;
             Icon = icoIdle;
             BackColor = Skin.Bg;
             ForeColor = Skin.Text;
@@ -1000,8 +1003,9 @@ namespace WorkTimer
                 fadeHide = false;
                 fadeT = 0;
                 Opacity = 0;
+                if (WindowState == FormWindowState.Minimized)
+                    WindowState = FormWindowState.Normal;
                 Show();
-                ShowInTaskbar = true;
                 WindowState = FormWindowState.Normal;
                 timer.Interval = 50;
                 UpdateAll();
@@ -1037,7 +1041,6 @@ namespace WorkTimer
                         {
                             fadeHide = false;
                             Hide();
-                            ShowInTaskbar = false;
                             timer.Interval = 1000;
                             Opacity = 1;      // чтобы следующий показ начинался чисто
                             UpdateTrayText();
