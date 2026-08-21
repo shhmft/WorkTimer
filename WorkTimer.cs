@@ -1956,8 +1956,10 @@ namespace WorkTimer
             if (dib == IntPtr.Zero) return;
 
             oldBmp = SelectObject(memDc, dib);
+            // PArgb, а не Argb: слоёное окно ждёт предумноженную альфу.
+            // С обычной альфой сглаженные края контура превращаются в ступеньки.
             buf = new Bitmap(Width, Height, Width * 4,
-                System.Drawing.Imaging.PixelFormat.Format32bppArgb, bits);
+                System.Drawing.Imaging.PixelFormat.Format32bppPArgb, bits);
             bufG = Graphics.FromImage(buf);
         }
 
