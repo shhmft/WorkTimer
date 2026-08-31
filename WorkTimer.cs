@@ -446,6 +446,23 @@ namespace WorkTimer
         }
         public static string SessionsFile { get { return Path.Combine(Dir, "sessions.csv"); } }
         public static string OverridesFile { get { return Path.Combine(Dir, "overrides.csv"); } }
+        public static string AdjustFile { get { return Path.Combine(Dir, "adjustments.csv"); } }
+        public static string LogFile { get { return Path.Combine(Dir, "errors.log"); } }
+
+        public static string LastError;
+
+        public static void Log(string what, Exception ex)
+        {
+            LastError = what + ": " + ex.GetType().Name + " — " + ex.Message;
+            try
+            {
+                File.AppendAllText(LogFile,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + LastError +
+                    Environment.NewLine + ex.StackTrace + Environment.NewLine + Environment.NewLine,
+                    Encoding.UTF8);
+            }
+            catch { }
+        }
         public static string SettingsFile { get { return Path.Combine(Dir, "settings.ini"); } }
 
         public static Dictionary<string, string> LoadSettings()
@@ -500,10 +517,60 @@ namespace WorkTimer
             StringBuilder sb = new StringBuilder();
             foreach (Segment g in list)
                 sb.AppendLine(g.Start.ToString("s") + "|" + g.End.ToString("s"));
-            string tmp = SessionsFile + ".tmp";
-            File.WriteAllText(tmp, sb.ToString(), Encoding.UTF8);
-            if (File.Exists(SessionsFile)) File.Delete(SessionsFile);
-            File.Move(tmp, SessionsFile);
+            WriteAtomic(SessionsFile, sb.ToString());
+        }
+
+        // Пишем во временный файл и подменяем им основной. Замена — через
+        // File.Replace, он не оставляет окна, в котором файла нет вовсе.
+        static void WriteAtomic(string path, string text)
+        {
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, text, Encoding.UTF8);
+            if (File.Exists(path))
+            {
+                try { File.Replace(tmp, path, null); }
+                catch (IOException) { File.Delete(path); File.Move(tmp, path); }
+            }
+            else File.Move(tmp, path);
+
+            // проверяем, что записанное действительно легло на диск
+            FileInfo fi = new FileInfo(path);
+            if (!fi.Exists || fi.Length == 0 && text.Length > 0)
+                throw new IOException("файл " + path + " не записался");
+        }
+
+        // Возвращает поправки в минутах: сколько ПРИБАВИТЬ к посчитанному за день.
+        // Старый формат хранил итог целиком и потому затирал отсчитанное время.
+        public static Dictionary<DateTime, double> LoadAdjust()
+        {
+            Dictionary<DateTime, double> map = new Dictionary<DateTime, double>();
+            if (!File.Exists(AdjustFile)) return map;
+            try
+            {
+                foreach (string line in File.ReadAllLines(AdjustFile))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0 || t[0] == '#') continue;
+                    string[] p = t.Split('|');
+                    if (p.Length < 2) continue;
+                    DateTime d; double m;
+                    if (DateTime.TryParse(p[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out d) &&
+                        double.TryParse(p[1], NumberStyles.Any, CultureInfo.InvariantCulture, out m))
+                        map[d.Date] = m;
+                }
+            }
+            catch (Exception ex) { Log("чтение adjustments.csv", ex); }
+            return map;
+        }
+
+        public static void SaveAdjust(Dictionary<DateTime, double> map)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("# поправки в минутах: дата|сколько прибавить к посчитанному");
+            foreach (KeyValuePair<DateTime, double> kv in map)
+                sb.AppendLine(kv.Key.ToString("yyyy-MM-dd") + "|" +
+                    kv.Value.ToString(CultureInfo.InvariantCulture));
+            WriteAtomic(AdjustFile, sb.ToString());
         }
 
         public static Dictionary<DateTime, double> LoadOverrides()
@@ -546,6 +613,7 @@ namespace WorkTimer
         int lastSecond = -1;
         float pulse = 0;
         string lastRowsKey = "";
+        bool saveBroken = false;
         static readonly CultureInfo Ru = CultureInfo.GetCultureInfo("ru-RU");
         float sheen = 0;              // бегущий блик по карточке
         float popT = 0;               // «подскок» цифр при смене минуты
@@ -667,7 +735,8 @@ namespace WorkTimer
         public TrayApp()
         {
             segments = Store.LoadSegments();
-            overrides = Store.LoadOverrides();
+            overrides = Store.LoadAdjust();
+            MigrateLegacyOverrides();
             settings = Store.LoadSettings();
             BuildIcons();
             BuildTray();
@@ -1089,6 +1158,21 @@ namespace WorkTimer
             using (Pen pn = new Pen(Color.FromArgb(32, 38, 54), 1f))
                 g.DrawLine(pn, MonthRect.X + 14, MonthRect.Y + 84, MonthRect.Right - 14, MonthRect.Y + 84);
 
+            if (saveBroken)
+            {
+                RectangleF warn = new RectangleF(20, MonthRect.Bottom + 6, W - 40, 26);
+                using (GraphicsPath wp = Skin.Round(warn, 8))
+                using (SolidBrush wb = new SolidBrush(Color.FromArgb(46, 220, 60, 80)))
+                    g.FillPath(wb, wp);
+                using (Pen pn = new Pen(Color.FromArgb(140, 220, 60, 80), 1f))
+                using (GraphicsPath wp = Skin.Round(warn, 8))
+                    g.DrawPath(pn, wp);
+                TextRenderer.DrawText(g, "⚠  Данные не сохраняются — подробности в errors.log",
+                    Skin.F(8.5f, FontStyle.Bold),
+                    new Rectangle(30, MonthRect.Bottom + 6, W - 60, 26), Skin.Rose,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+            else
             TextRenderer.DrawText(g, statsLine, Skin.F(8.5f, FontStyle.Regular),
                 new Rectangle(22, MonthRect.Bottom + 10, W - 44, 18), Skin.Dim,
                 TextFormatFlags.Left | TextFormatFlags.NoPadding);
@@ -1189,6 +1273,39 @@ namespace WorkTimer
             settings["wx"] = hud.Left.ToString(CultureInfo.InvariantCulture);
             settings["wy"] = hud.AnchorTop.ToString(CultureInfo.InvariantCulture);
             Store.SaveSettings(settings);
+        }
+
+        // Старый overrides.csv хранил итог дня целиком. Переводим в поправку
+        // «сколько прибавить», чтобы отсчитанное время больше не затиралось.
+        void MigrateLegacyOverrides()
+        {
+            try
+            {
+                if (!File.Exists(Store.OverridesFile)) return;
+                Dictionary<DateTime, double> old = Store.LoadOverrides();
+                if (old.Count > 0)
+                {
+                    Dictionary<DateTime, double> raw = BuildRawMap();
+                    foreach (KeyValuePair<DateTime, double> kv in old)
+                    {
+                        double b = raw.ContainsKey(kv.Key) ? raw[kv.Key] : 0;
+                        double delta = kv.Value - b;
+                        if (Math.Abs(delta) > 0.01) overrides[kv.Key] = delta;
+                    }
+                }
+                File.Move(Store.OverridesFile, Store.OverridesFile + ".old");
+                Store.SaveAdjust(overrides);
+            }
+            catch (Exception ex) { Store.Log("перенос overrides.csv", ex); }
+        }
+
+        // сумма по дням только из отрезков, без ручных поправок
+        Dictionary<DateTime, double> BuildRawMap()
+        {
+            Dictionary<DateTime, double> map = new Dictionary<DateTime, double>();
+            foreach (Segment g in segments) AddSpan(map, g.Start, g.End);
+            if (Running) AddSpan(map, runStart.Value, DateTime.Now);
+            return map;
         }
 
         void OpenSettings()
@@ -1321,10 +1438,27 @@ namespace WorkTimer
                 if (Running && (DateTime.Now - runStart.Value).TotalSeconds >= 1)
                     all.Add(new Segment(runStart.Value, DateTime.Now));
                 Store.SaveSegments(all);
-                Store.SaveOverrides(overrides);
+                Store.SaveAdjust(overrides);
                 lastSave = DateTime.Now;
+                if (saveBroken) { saveBroken = false; Invalidate(); }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Store.Log("сохранение данных", ex);
+                if (!saveBroken)
+                {
+                    saveBroken = true;
+                    try
+                    {
+                        tray.BalloonTipIcon = ToolTipIcon.Error;
+                        tray.BalloonTipTitle = "WorkTimer: данные не сохраняются";
+                        tray.BalloonTipText = Store.LastError;
+                        tray.ShowBalloonTip(15000);
+                    }
+                    catch { }
+                    Invalidate();
+                }
+            }
         }
 
         static void AddSpan(Dictionary<DateTime, double> map, DateTime s, DateTime e)
@@ -1345,7 +1479,12 @@ namespace WorkTimer
             Dictionary<DateTime, double> map = new Dictionary<DateTime, double>();
             foreach (Segment g in segments) AddSpan(map, g.Start, g.End);
             if (Running) AddSpan(map, runStart.Value, DateTime.Now);
-            foreach (KeyValuePair<DateTime, double> kv in overrides) map[kv.Key] = kv.Value;
+            foreach (KeyValuePair<DateTime, double> kv in overrides)
+            {
+                double b = map.ContainsKey(kv.Key) ? map[kv.Key] : 0;
+                double v = b + kv.Value;
+                map[kv.Key] = v < 0 ? 0 : v;
+            }
             return map;
         }
 
@@ -1477,8 +1616,13 @@ namespace WorkTimer
         {
             Dictionary<DateTime, double> map = BuildDayMap();
             double cur = map.ContainsKey(day) ? map[day] : 0;
-            string res = Prompt.Show(this, day.ToString("dd.MM.yyyy"),
-                "Часы за день: 7:30, 7.5 или 450m.  Пустое поле — вернуть автоподсчёт.", Fmt(cur));
+            Dictionary<DateTime, double> raw = BuildRawMap();
+            double baseMin = raw.ContainsKey(day) ? raw[day] : 0;
+            string hint = baseMin > 0
+                ? "Часы за день: 7:30, 7.5 или 450m.  Отсчитано таймером: " + Fmt(baseMin) +
+                  " — дальнейший учёт добавится сверху."
+                : "Часы за день: 7:30, 7.5 или 450m.  Пустое поле — убрать правку.";
+            string res = Prompt.Show(this, day.ToString("dd.MM.yyyy"), hint, Fmt(cur));
             if (res == null) return;
             res = res.Trim();
             if (res.Length == 0)
@@ -1493,7 +1637,9 @@ namespace WorkTimer
                     MessageBox.Show("Не понял формат. Примеры: 7:30, 7.5, 450m", "WorkTimer");
                     return;
                 }
-                overrides[day] = mins;
+                double delta = mins - baseMin;
+                if (Math.Abs(delta) < 0.01) overrides.Remove(day);
+                else overrides[day] = delta;
             }
             DropCache(); lastRowsKey = "";
             SaveNow();
