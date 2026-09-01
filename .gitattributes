@@ -1,0 +1,9 @@
+# Скрипты и исходники для Linux обязаны иметь LF: с CRLF ядро не найдёт
+# интерпретатор в шебанге и откажется запускать файл
+linux/worktimer     text eol=lf
+linux/*.sh          text eol=lf
+linux/*.py          text eol=lf
+linux/*.desktop     text eol=lf
+linux/*.svg         text eol=lf
+*.cs                text
+*.md                text
