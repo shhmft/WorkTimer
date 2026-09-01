@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=WorkTimer
+Name[ru]=WorkTimer
+GenericName=Work hours tracker
+GenericName[ru]=Учёт рабочих часов
+Comment=Track working hours from the system tray
+Comment[ru]=Учёт рабочего времени из системного лотка
+Exec=/usr/bin/worktimer
+Icon=worktimer
+Terminal=false
+Categories=Utility;Office;ProjectManagement;
+Keywords=time;timer;tracker;hours;work;
+Keywords[ru]=время;таймер;учёт;часы;работа;
+StartupNotify=false

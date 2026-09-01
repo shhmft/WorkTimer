@@ -1,0 +1,1038 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+WorkTimer — учёт рабочих часов в трее.
+Порт windows-версии на GTK3: рисование через Cairo, чтобы вид совпадал.
+"""
+
+import os
+import sys
+import math
+import csv
+import datetime as dt
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo  # noqa: E402
+
+APPIND = None
+for ns, ver in (("AyatanaAppIndicator3", "0.1"), ("AppIndicator3", "0.1")):
+    try:
+        gi.require_version(ns, ver)
+        APPIND = __import__("gi.repository." + ns, fromlist=[ns])
+        break
+    except (ValueError, ImportError):
+        continue
+
+APP = "worktimer"
+VERSION = "1.0.0"
+
+# ---------------------------------------------------------------- палитра
+BG = (13 / 255, 15 / 255, 22 / 255)
+CARD = (21 / 255, 25 / 255, 35 / 255)
+CARD2 = (29 / 255, 34 / 255, 48 / 255)
+CARD3 = (38 / 255, 45 / 255, 63 / 255)
+LINE = (40 / 255, 47 / 255, 66 / 255)
+TEXT = (232 / 255, 237 / 255, 246 / 255)
+MUTED = (124 / 255, 137 / 255, 163 / 255)
+DIM = (86 / 255, 96 / 255, 119 / 255)
+A1 = (129 / 255, 91 / 255, 255 / 255)
+A2 = (34 / 255, 211 / 255, 238 / 255)
+GREEN = (45 / 255, 212 / 255, 137 / 255)
+AMBER = (250 / 255, 176 / 255, 60 / 255)
+ROSE = (244 / 255, 96 / 255, 128 / 255)
+
+W, H = 486, 736
+HERO = (20, 62, W - 40, 154)
+MONTH = (20, 296, W - 40, 348)
+ROW_H = 30
+
+RU_MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль",
+             "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+# ---------------------------------------------------------------- хранилище
+def data_dir():
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    d = os.path.join(base, APP)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def cfg_dir():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    d = os.path.join(base, APP)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+SESSIONS = lambda: os.path.join(data_dir(), "sessions.csv")      # noqa: E731
+ADJUST = lambda: os.path.join(data_dir(), "adjustments.csv")      # noqa: E731
+SETTINGS = lambda: os.path.join(cfg_dir(), "settings.ini")        # noqa: E731
+ERRLOG = lambda: os.path.join(data_dir(), "errors.log")           # noqa: E731
+
+last_error = [None]
+
+
+def log_error(what, exc):
+    last_error[0] = "%s: %s" % (what, exc)
+    try:
+        with open(ERRLOG(), "a", encoding="utf-8") as f:
+            f.write("%s  %s\n" % (dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                  last_error[0]))
+    except Exception:
+        pass
+
+
+def write_atomic(path, text):
+    """Пишем во временный файл и подменяем — как в windows-версии."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    if not os.path.exists(path) or (os.path.getsize(path) == 0 and text):
+        raise IOError("файл %s не записался" % path)
+
+
+def load_segments():
+    out = []
+    if not os.path.exists(SESSIONS()):
+        return out
+    try:
+        with open(SESSIONS(), encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                p = line.split("|")
+                if len(p) < 2:
+                    continue
+                try:
+                    a = dt.datetime.fromisoformat(p[0])
+                    b = dt.datetime.fromisoformat(p[1])
+                except ValueError:
+                    continue
+                if b > a:
+                    out.append((a, b))
+    except Exception as e:
+        log_error("чтение sessions.csv", e)
+    return out
+
+
+def save_segments(segs):
+    write_atomic(SESSIONS(), "".join(
+        "%s|%s\n" % (a.replace(microsecond=0).isoformat(),
+                     b.replace(microsecond=0).isoformat()) for a, b in segs))
+
+
+def load_adjust():
+    out = {}
+    if not os.path.exists(ADJUST()):
+        return out
+    try:
+        with open(ADJUST(), encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                p = line.split("|")
+                if len(p) < 2:
+                    continue
+                try:
+                    out[dt.date.fromisoformat(p[0])] = float(p[1])
+                except ValueError:
+                    continue
+    except Exception as e:
+        log_error("чтение adjustments.csv", e)
+    return out
+
+
+def save_adjust(adj):
+    body = "# поправки в минутах: дата|сколько прибавить к посчитанному\n"
+    body += "".join("%s|%s\n" % (d.isoformat(), v) for d, v in sorted(adj.items()))
+    write_atomic(ADJUST(), body)
+
+
+def load_settings():
+    out = {}
+    if os.path.exists(SETTINGS()):
+        try:
+            with open(SETTINGS(), encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        out[k.strip()] = v.strip()
+        except Exception as e:
+            log_error("чтение settings.ini", e)
+    return out
+
+
+def save_settings(s):
+    try:
+        write_atomic(SETTINGS(), "".join("%s=%s\n" % (k, v) for k, v in s.items()))
+    except Exception as e:
+        log_error("запись settings.ini", e)
+
+
+def fmt(minutes):
+    if minutes < 0:
+        minutes = 0
+    t = int(round(minutes))
+    return "%d:%02d" % (t // 60, t % 60)
+
+
+# ---------------------------------------------------------------- рисование
+def rounded(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def text(cr, s, x, y, size, color, bold=False, align="left", width=None):
+    layout = PangoCairo.create_layout(cr)
+    desc = Pango.FontDescription("Sans %s%d" % ("Bold " if bold else "", size))
+    layout.set_font_description(desc)
+    layout.set_text(s, -1)
+    tw, th = layout.get_pixel_size()
+    if align == "right" and width is not None:
+        x = x + width - tw
+    elif align == "center" and width is not None:
+        x = x + (width - tw) / 2
+    cr.set_source_rgb(*color)
+    cr.move_to(x, y)
+    PangoCairo.show_layout(cr, layout)
+    return tw, th
+
+
+def grad(cr, x, y, w, h, c1, c2, horizontal=True):
+    import cairo
+    g = cairo.LinearGradient(x, y, x + w if horizontal else x,
+                             y if horizontal else y + h)
+    g.add_color_stop_rgb(0, *c1)
+    g.add_color_stop_rgb(1, *c2)
+    cr.set_source(g)
+
+
+# ---------------------------------------------------------------- ядро
+class Core:
+    def __init__(self):
+        self.segments = load_segments()
+        self.adjust = load_adjust()
+        self.settings = load_settings()
+        self.run_start = None
+        self.session_accum = 0.0
+        self.save_broken = False
+        self.last_save = dt.datetime.now()
+
+    # --- состояние ---
+    @property
+    def running(self):
+        return self.run_start is not None
+
+    def toggle(self):
+        if self.running:
+            self.close_segment()
+        else:
+            self.run_start = dt.datetime.now()
+        self.save()
+
+    def stop(self):
+        if self.running:
+            self.close_segment()
+        self.session_accum = 0.0
+        self.save()
+
+    def close_segment(self):
+        if not self.run_start:
+            return
+        now = dt.datetime.now()
+        if (now - self.run_start).total_seconds() >= 1:
+            self.segments.append((self.run_start, now))
+            self.session_accum += (now - self.run_start).total_seconds() / 60.0
+        self.run_start = None
+
+    # --- подсчёт ---
+    def raw_map(self):
+        m = {}
+        for a, b in self.segments:
+            self._span(m, a, b)
+        if self.running:
+            self._span(m, self.run_start, dt.datetime.now())
+        return m
+
+    @staticmethod
+    def _span(m, a, b):
+        while a < b:
+            day_end = dt.datetime.combine(a.date() + dt.timedelta(days=1), dt.time())
+            chunk = min(b, day_end)
+            m[a.date()] = m.get(a.date(), 0.0) + (chunk - a).total_seconds() / 60.0
+            a = chunk
+
+    def day_map(self):
+        m = self.raw_map()
+        for d, delta in self.adjust.items():
+            m[d] = max(0.0, m.get(d, 0.0) + delta)
+        return m
+
+    def today(self):
+        return self.day_map().get(dt.date.today(), 0.0)
+
+    def session(self):
+        s = self.session_accum
+        if self.running:
+            s += (dt.datetime.now() - self.run_start).total_seconds() / 60.0
+        return s
+
+    # --- запись ---
+    def save(self):
+        try:
+            segs = list(self.segments)
+            if self.running and (dt.datetime.now() - self.run_start).total_seconds() >= 1:
+                segs.append((self.run_start, dt.datetime.now()))
+            save_segments(segs)
+            save_adjust(self.adjust)
+            self.last_save = dt.datetime.now()
+            self.save_broken = False
+        except Exception as e:
+            log_error("сохранение данных", e)
+            self.save_broken = True
+
+
+# ---------------------------------------------------------------- окно
+class MainWindow(Gtk.Window):
+    def __init__(self, app):
+        super().__init__(title="WorkTimer — учёт рабочих часов")
+        self.app = app
+        self.core = app.core
+        self.set_default_size(W, H)
+        self.set_size_request(W, H)
+        self.set_resizable(False)
+        self.set_skip_taskbar_hint(False)
+        self.view_month = dt.date.today().replace(day=1)
+        self.scroll = 0
+        self.hover = None
+        self.rows = []
+
+        self.area = Gtk.DrawingArea()
+        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
+                             Gdk.EventMask.POINTER_MOTION_MASK |
+                             Gdk.EventMask.SCROLL_MASK |
+                             Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_click)
+        self.area.connect("motion-notify-event", self.on_motion)
+        self.area.connect("scroll-event", self.on_scroll)
+        self.add(self.area)
+        self.connect("delete-event", self.on_close)
+
+    def on_close(self, *_):
+        self.hide()
+        return True
+
+    # ---- геометрия кнопок: (x, y, w, h, действие) ----
+    def buttons(self):
+        return [
+            (20, 232, 268, 52, "toggle"),
+            (298, 232, W - 318, 52, "stop"),
+            (MONTH[0] + 14, MONTH[1] + 16, 30, 30, "prev"),
+            (MONTH[0] + 48, MONTH[1] + 16, 30, 30, "next"),
+            (20, H - 52, 132, 38, "export"),
+            (162, H - 52, 128, 38, "widget"),
+            (300, H - 52, 166, 38, "hide"),
+            (W - 112, 14, 28, 28, "settings"),
+        ]
+
+    def on_motion(self, _w, ev):
+        hit = None
+        for x, y, w, h, name in self.buttons():
+            if x <= ev.x <= x + w and y <= ev.y <= y + h:
+                hit = name
+        idx = None
+        lx, ly = MONTH[0] + 8, MONTH[1] + 96
+        if lx <= ev.x <= lx + MONTH[2] - 16 and ly <= ev.y <= ly + 240:
+            i = int((ev.y - ly + self.scroll) // ROW_H)
+            if 0 <= i < len(self.rows):
+                idx = i
+        if (hit, idx) != self.hover:
+            self.hover = (hit, idx)
+            self.area.queue_draw()
+        return True
+
+    def on_scroll(self, _w, ev):
+        maxs = max(0, len(self.rows) * ROW_H - 240)
+        if ev.direction == Gdk.ScrollDirection.DOWN:
+            self.scroll = min(maxs, self.scroll + ROW_H * 2)
+        elif ev.direction == Gdk.ScrollDirection.UP:
+            self.scroll = max(0, self.scroll - ROW_H * 2)
+        self.area.queue_draw()
+        return True
+
+    def on_click(self, _w, ev):
+        for x, y, w, h, name in self.buttons():
+            if x <= ev.x <= x + w and y <= ev.y <= y + h:
+                self.do_action(name)
+                return True
+        lx, ly = MONTH[0] + 8, MONTH[1] + 96
+        if ev.type == Gdk.EventType._2BUTTON_PRESS and lx <= ev.x <= lx + MONTH[2] - 16:
+            i = int((ev.y - ly + self.scroll) // ROW_H)
+            if 0 <= i < len(self.rows):
+                self.app.edit_day(self.rows[i][0])
+        return True
+
+    def do_action(self, name):
+        if name == "toggle":
+            self.core.toggle(); self.app.refresh()
+        elif name == "stop":
+            self.core.stop(); self.app.refresh()
+        elif name == "prev":
+            self.view_month = (self.view_month - dt.timedelta(days=1)).replace(day=1)
+            self.scroll = 0
+        elif name == "next":
+            nxt = self.view_month.replace(day=28) + dt.timedelta(days=7)
+            self.view_month = nxt.replace(day=1)
+            self.scroll = 0
+        elif name == "export":
+            self.app.export_dialog()
+        elif name == "widget":
+            self.app.toggle_widget()
+        elif name == "hide":
+            self.hide()
+        elif name == "settings":
+            self.app.settings_dialog()
+        self.area.queue_draw()
+
+    # ---- отрисовка ----
+    def on_draw(self, _w, cr):
+        core = self.core
+        running, paused = core.running, (not core.running and core.session_accum > 0)
+        cr.set_source_rgb(*BG)
+        cr.paint()
+
+        # шапка
+        grad(cr, 20, 21, 14, 14, A1, A2)
+        rounded(cr, 20, 21, 14, 14, 4)
+        cr.fill()
+        text(cr, "W O R K T I M E R", 44, 20, 8, MUTED, bold=True)
+        text(cr, "⚙", W - 104, 18, 12, MUTED)
+        text(cr, "✕", W - 40, 18, 11, MUTED)
+
+        # карточка «сегодня»
+        acc = GREEN if running else (AMBER if paused else DIM)
+        grad(cr, HERO[0], HERO[1], HERO[2], HERO[3],
+             (26 / 255, 31 / 255, 45 / 255), (19 / 255, 23 / 255, 33 / 255), False)
+        rounded(cr, *HERO, 20)
+        cr.fill_preserve()
+        cr.set_source_rgb(*(acc if running else LINE))
+        cr.set_line_width(1.4 if running else 1)
+        cr.stroke()
+
+        grad(cr, HERO[0] + 1, HERO[1] + 26, 4, 44, GREEN if running else A1, A2, False)
+        rounded(cr, HERO[0] + 1, HERO[1] + 26, 4, 44, 2)
+        cr.fill()
+
+        st = "ИДЁТ УЧЁТ" if running else ("ПАУЗА" if paused else "ОСТАНОВЛЕН")
+        cr.set_source_rgba(*acc, 0.15)
+        rounded(cr, HERO[0] + 22, HERO[1] + 20, 32 + len(st) * 7, 22, 11)
+        cr.fill()
+        cr.set_source_rgb(*acc)
+        cr.arc(HERO[0] + 36, HERO[1] + 31, 3.5, 0, 2 * math.pi)
+        cr.fill()
+        text(cr, st, HERO[0] + 45, HERO[1] + 24, 8, acc, bold=True)
+
+        text(cr, fmt(core.today()), HERO[0] + 20, HERO[1] + 48, 34,
+             TEXT if not running else A2, bold=True)
+        text(cr, "часов сегодня", HERO[0] + 24, HERO[1] + 118, 8, DIM)
+        text(cr, "ТЕКУЩАЯ СЕССИЯ", HERO[0], HERO[1] + 62, 7, DIM,
+             bold=True, align="right", width=HERO[2] - 20)
+        text(cr, fmt(core.session()), HERO[0], HERO[1] + 78, 15,
+             TEXT if running else MUTED, bold=True, align="right", width=HERO[2] - 20)
+
+        # кнопки
+        self.draw_button(cr, 20, 232, 268, 52,
+                         "ПАУЗА" if running else ("ПРОДОЛЖИТЬ" if paused else "СТАРТ"),
+                         primary=True, running=running)
+        self.draw_button(cr, 298, 232, W - 318, 52, "Стоп")
+
+        # карточка месяца
+        cr.set_source_rgb(*CARD)
+        rounded(cr, *MONTH, 20)
+        cr.fill_preserve()
+        cr.set_source_rgb(*LINE)
+        cr.set_line_width(1)
+        cr.stroke()
+
+        self.draw_button(cr, MONTH[0] + 14, MONTH[1] + 16, 30, 30, "‹", small=True)
+        self.draw_button(cr, MONTH[0] + 48, MONTH[1] + 16, 30, 30, "›", small=True)
+        title = "%s %d" % (RU_MONTHS[self.view_month.month - 1], self.view_month.year)
+        text(cr, title, MONTH[0] + 88, MONTH[1] + 22, 11, TEXT, bold=True)
+
+        self.rows, total, worked, mx = self.month_rows()
+        text(cr, "ИТОГО ЗА МЕСЯЦ", MONTH[0], MONTH[1] + 14, 7, DIM,
+             bold=True, align="right", width=MONTH[2] - 16)
+        text(cr, fmt(total), MONTH[0], MONTH[1] + 28, 16, A2,
+             bold=True, align="right", width=MONTH[2] - 16)
+
+        cr.set_source_rgb(32 / 255, 38 / 255, 54 / 255)
+        cr.set_line_width(1)
+        cr.move_to(MONTH[0] + 14, MONTH[1] + 84)
+        cr.line_to(MONTH[0] + MONTH[2] - 14, MONTH[1] + 84)
+        cr.stroke()
+
+        self.draw_rows(cr, mx)
+
+        # подвал
+        if core.save_broken:
+            cr.set_source_rgba(*ROSE, 0.18)
+            rounded(cr, 20, MONTH[1] + MONTH[3] + 6, W - 40, 26, 8)
+            cr.fill()
+            text(cr, "⚠  Данные не сохраняются — смотри errors.log",
+                 30, MONTH[1] + MONTH[3] + 11, 8, ROSE, bold=True)
+        else:
+            stats = "%d дн.   ·   в среднем %s   ·   %.2f ч. десятичных" % (
+                worked, fmt(total / worked if worked else 0), total / 60.0)
+            text(cr, stats, 22, MONTH[1] + MONTH[3] + 10, 8, DIM)
+
+        self.draw_button(cr, 20, H - 52, 132, 38, "Экспорт CSV")
+        self.draw_button(cr, 162, H - 52, 128, 38,
+                         "Виджет: вкл" if self.app.widget else "Виджет: выкл",
+                         accent=bool(self.app.widget))
+        self.draw_button(cr, 300, H - 52, 166, 38, "Свернуть в трей")
+        return False
+
+    def draw_button(self, cr, x, y, w, h, label, primary=False, small=False,
+                    accent=False, running=False):
+        hov = self.hover and self.hover[0] and self.point_in(x, y, w, h)
+        if primary:
+            c1, c2 = ((AMBER, (240 / 255, 110 / 255, 90 / 255)) if running else (A1, A2))
+            grad(cr, x, y, w, h, c1, c2)
+            rounded(cr, x, y, w, h, 14)
+            cr.fill()
+            text(cr, label, x, y + h / 2 - 9, 10, (1, 1, 1), bold=True,
+                 align="center", width=w)
+        else:
+            cr.set_source_rgb(*(CARD2 if hov else (26 / 255, 31 / 255, 44 / 255)))
+            rounded(cr, x, y, w, h, 9 if small else 12)
+            cr.fill_preserve()
+            cr.set_source_rgb(*LINE)
+            cr.set_line_width(1)
+            cr.stroke()
+            col = A2 if accent else MUTED
+            text(cr, label, x, y + h / 2 - (9 if not small else 10), 10 if small else 9,
+                 col, align="center", width=w)
+
+    def point_in(self, x, y, w, h):
+        return False  # наведение подсвечивается по имени кнопки, см. on_motion
+
+    def month_rows(self):
+        m = self.core.day_map()
+        first = self.view_month
+        nxt = (first.replace(day=28) + dt.timedelta(days=7)).replace(day=1)
+        rows, total, worked, mx = [], 0.0, 0, 480.0
+        d = first
+        today = dt.date.today()
+        while d < nxt:
+            v = m.get(d, 0.0)
+            if v > 0 or d == today:
+                if v > 0:
+                    total += v
+                    worked += 1
+                mx = max(mx, v)
+                rows.append((d, v, d in self.core.adjust, d == today))
+            d += dt.timedelta(days=1)
+        return rows, total, worked, mx
+
+    def draw_rows(self, cr, mx):
+        lx, ly, lw, lh = MONTH[0] + 8, MONTH[1] + 96, MONTH[2] - 16, 240
+        cr.save()
+        cr.rectangle(lx, ly, lw, lh)
+        cr.clip()
+        if not self.rows:
+            text(cr, "Пока пусто — нажми «Старт»", lx, ly + lh / 2 - 8, 9, DIM,
+                 align="center", width=lw)
+            cr.restore()
+            return
+        bar_x, bar_w = lx + 110, lw - 110 - 82
+        for i, (day, val, manual, is_today) in enumerate(self.rows):
+            y = ly + i * ROW_H - self.scroll
+            if y + ROW_H < ly or y > ly + lh:
+                continue
+            if self.hover and self.hover[1] == i:
+                cr.set_source_rgb(28 / 255, 33 / 255, 47 / 255)
+                rounded(cr, lx, y + 1, lw - 6, ROW_H - 2, 8)
+                cr.fill()
+            if is_today:
+                cr.set_source_rgb(*A2)
+                rounded(cr, lx, y + 8, 3, ROW_H - 16, 1.5)
+                cr.fill()
+            weekend = day.weekday() >= 5
+            text(cr, day.strftime("%d.%m"), lx + 12, y + 7, 9,
+                 ROSE if weekend else TEXT, bold=is_today)
+            text(cr, RU_DOW[day.weekday()], lx + 66, y + 8, 8,
+                 ROSE if weekend else DIM)
+            cr.set_source_rgb(30 / 255, 36 / 255, 51 / 255)
+            rounded(cr, bar_x, y + ROW_H / 2 - 3.5, bar_w, 7, 3.5)
+            cr.fill()
+            frac = min(1.0, val / mx) if mx else 0
+            if frac > 0.01:
+                grad(cr, bar_x, y, bar_w, 7, A1, A2)
+                rounded(cr, bar_x, y + ROW_H / 2 - 3.5, bar_w * frac, 7, 3.5)
+                cr.fill()
+            label = fmt(val) + (" *" if manual else "")
+            text(cr, label, lx, y + 7, 9, A2 if is_today else TEXT, bold=True,
+                 align="right", width=lw - 12)
+        cr.restore()
+
+
+# ---------------------------------------------------------------- виджет
+class Widget(Gtk.Window):
+    WW, WH = 214, 70
+
+    def __init__(self, app):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.app = app
+        self.core = app.core
+        self.set_default_size(self.WW, self.WH)
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+        self.set_app_paintable(True)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.drag = None
+
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
+                        Gdk.EventMask.BUTTON_RELEASE_MASK |
+                        Gdk.EventMask.POINTER_MOTION_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_press)
+        self.connect("motion-notify-event", self.on_move)
+        self.connect("button-release-event", self.on_release)
+
+        s = self.core.settings
+        try:
+            self.move(int(s.get("wx", 60)), int(s.get("wy", 60)))
+        except ValueError:
+            self.move(60, 60)
+
+    def alpha(self):
+        try:
+            return max(0.35, min(1.0, float(self.core.settings.get("alpha", 0.92))))
+        except ValueError:
+            return 0.92
+
+    def on_press(self, _w, ev):
+        if ev.button == 3:
+            self.app.menu_popup(ev)
+            return True
+        if ev.x >= self.WW - 52 and 18 <= ev.y <= 52:
+            self.core.toggle()
+            self.app.refresh()
+            return True
+        self.drag = (ev.x_root, ev.y_root) + tuple(self.get_position())
+        return True
+
+    def on_move(self, _w, ev):
+        if self.drag:
+            x0, y0, wx, wy = self.drag
+            self.move(int(wx + ev.x_root - x0), int(wy + ev.y_root - y0))
+        return True
+
+    def on_release(self, *_):
+        if self.drag:
+            self.drag = None
+            x, y = self.get_position()
+            self.core.settings["wx"] = str(x)
+            self.core.settings["wy"] = str(y)
+            save_settings(self.core.settings)
+        return True
+
+    def on_draw(self, _w, cr):
+        core = self.core
+        a = self.alpha()
+        running = core.running
+        paused = not running and core.session_accum > 0
+        acc = GREEN if running else (AMBER if paused else MUTED)
+
+        cr.set_operator(1)  # SOURCE — стираем прошлый кадр вместе с прозрачностью
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(2)  # OVER
+
+        cr.set_source_rgba(24 / 255, 28 / 255, 40 / 255, 0.88 * a)
+        rounded(cr, 1, 1, self.WW - 2, self.WH - 2, 18)
+        cr.fill_preserve()
+        cr.set_source_rgba(*acc, (0.35 if running else 0.18) * a)
+        cr.set_line_width(1.4)
+        cr.stroke()
+
+        cr.set_source_rgba(*acc, a)
+        cr.arc(17, self.WH / 2, 4.5, 0, 2 * math.pi)
+        cr.fill()
+
+        cr.push_group()
+        text(cr, fmt(core.today()), 31, 11, 17, A2 if running else TEXT, bold=True)
+        sub = ("сессия " + fmt(core.session())) if (running or paused) else "остановлен"
+        text(cr, sub, 33, 43, 7, DIM)
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(a)
+
+        bx, by = self.WW - 35, self.WH / 2
+        cr.set_source_rgba(*CARD2, 0.7 * a)
+        cr.arc(bx, by, 17, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgba(1, 1, 1, 0.92 * a)
+        if running:
+            cr.rectangle(bx - 4.5, by - 6, 3.2, 12)
+            cr.rectangle(bx + 1.3, by - 6, 3.2, 12)
+            cr.fill()
+        else:
+            cr.move_to(bx - 4, by - 6.5)
+            cr.line_to(bx + 6, by)
+            cr.line_to(bx - 4, by + 6.5)
+            cr.close_path()
+            cr.fill()
+
+        frac = min(1.0, core.today() / 480.0)
+        cr.set_source_rgba(90 / 255, 105 / 255, 140 / 255, 0.3 * a)
+        rounded(cr, 16, self.WH - 11, self.WW - 32, 3, 1.5)
+        cr.fill()
+        if frac > 0.005:
+            grad(cr, 16, self.WH - 11, self.WW - 32, 3,
+                 GREEN if frac >= 1 else A1, A2)
+            rounded(cr, 16, self.WH - 11, (self.WW - 32) * frac, 3, 1.5)
+            cr.fill()
+        return False
+
+
+# ---------------------------------------------------------------- приложение
+class App:
+    def __init__(self):
+        self.core = Core()
+        self.window = MainWindow(self)
+        self.widget = None
+        self.ind = None
+        self.menu = None
+        self.build_tray()
+        if self.core.settings.get("widget", "1") != "0":
+            self.toggle_widget()
+        GLib.timeout_add(1000, self.tick)
+
+    # ---- трей ----
+    def build_tray(self):
+        self.menu = Gtk.Menu()
+        self.mi_toggle = Gtk.MenuItem(label="Старт")
+        self.mi_toggle.connect("activate", lambda *_: (self.core.toggle(), self.refresh()))
+        self.menu.append(self.mi_toggle)
+        mi_stop = Gtk.MenuItem(label="Стоп — завершить сессию")
+        mi_stop.connect("activate", lambda *_: (self.core.stop(), self.refresh()))
+        self.menu.append(mi_stop)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        mi_show = Gtk.MenuItem(label="Показать окно")
+        mi_show.connect("activate", lambda *_: self.show_window())
+        self.menu.append(mi_show)
+        mi_cfg = Gtk.MenuItem(label="Настройки")
+        mi_cfg.connect("activate", lambda *_: self.settings_dialog())
+        self.menu.append(mi_cfg)
+        mi_dir = Gtk.MenuItem(label="Папка с данными")
+        mi_dir.connect("activate", lambda *_: Gtk.show_uri_on_window(
+            None, "file://" + data_dir(), Gdk.CURRENT_TIME))
+        self.menu.append(mi_dir)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        mi_w = Gtk.MenuItem(label="Виджет на экране")
+        mi_w.connect("activate", lambda *_: self.toggle_widget())
+        self.menu.append(mi_w)
+        mi_auto = Gtk.MenuItem(label="Запускать при входе")
+        mi_auto.connect("activate", lambda *_: self.toggle_autostart())
+        self.menu.append(mi_auto)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        mi_quit = Gtk.MenuItem(label="Выход")
+        mi_quit.connect("activate", lambda *_: self.quit())
+        self.menu.append(mi_quit)
+        self.menu.show_all()
+
+        if APPIND:
+            cls = getattr(APPIND, "Indicator")
+            self.ind = cls.new(APP, "appointment-soon",
+                               APPIND.IndicatorCategory.APPLICATION_STATUS)
+            self.ind.set_status(APPIND.IndicatorStatus.ACTIVE)
+            self.ind.set_menu(self.menu)
+            self.ind.set_title("WorkTimer")
+        else:
+            self.ind = Gtk.StatusIcon.new_from_icon_name("appointment-soon")
+            self.ind.set_tooltip_text("WorkTimer")
+            self.ind.connect("activate", lambda *_: self.show_window())
+            self.ind.connect("popup-menu", lambda i, b, t:
+                             self.menu.popup(None, None, None, None, b, t))
+
+    def menu_popup(self, ev):
+        self.menu.popup_at_pointer(ev)
+
+    def show_window(self):
+        self.window.show_all()
+        self.window.present()
+
+    # ---- обновление ----
+    def tick(self):
+        core = self.core
+        if core.running and (dt.datetime.now() - core.last_save).total_seconds() >= 15:
+            core.save()
+        self.refresh()
+        return True
+
+    def refresh(self):
+        core = self.core
+        running, paused = core.running, (not core.running and core.session_accum > 0)
+        state = "Идёт учёт" if running else ("Пауза" if paused else "Остановлен")
+        label = "%s • сегодня %s" % (state, fmt(core.today()))
+        self.mi_toggle.set_label("Пауза" if running else
+                                 ("Продолжить" if paused else "Старт"))
+        icon = ("media-playback-start" if running else
+                ("media-playback-pause" if paused else "appointment-soon"))
+        try:
+            if APPIND and hasattr(self.ind, "set_icon_full"):
+                self.ind.set_icon_full(icon, label)
+                self.ind.set_label(fmt(core.today()), "0:00")
+            else:
+                self.ind.set_from_icon_name(icon)
+                self.ind.set_tooltip_text(label)
+        except Exception:
+            pass
+        if self.window.get_visible():
+            self.window.area.queue_draw()
+        if self.widget:
+            self.widget.queue_draw()
+
+    # ---- виджет ----
+    def toggle_widget(self):
+        if self.widget:
+            self.widget.destroy()
+            self.widget = None
+            self.core.settings["widget"] = "0"
+        else:
+            self.widget = Widget(self)
+            self.widget.show_all()
+            self.core.settings["widget"] = "1"
+        save_settings(self.core.settings)
+        self.refresh()
+
+    # ---- автозапуск ----
+    def autostart_path(self):
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        d = os.path.join(base, "autostart")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "worktimer.desktop")
+
+    def autostart_on(self):
+        return os.path.exists(self.autostart_path())
+
+    def toggle_autostart(self):
+        p = self.autostart_path()
+        if self.autostart_on():
+            os.remove(p)
+        else:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("[Desktop Entry]\nType=Application\nName=WorkTimer\n"
+                        "Exec=/usr/bin/worktimer\nIcon=worktimer\n"
+                        "X-GNOME-Autostart-enabled=true\nTerminal=false\n")
+
+    # ---- диалоги ----
+    def edit_day(self, day):
+        raw = self.core.raw_map().get(day, 0.0)
+        cur = self.core.day_map().get(day, 0.0)
+        d = Gtk.Dialog(title="Часы за " + day.strftime("%d.%m.%Y"),
+                       transient_for=self.window, modal=True)
+        d.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить", Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(12)
+        hint = ("Отсчитано таймером: %s — дальнейший учёт добавится сверху."
+                % fmt(raw)) if raw > 0 else "Пустое поле — убрать правку."
+        box.add(Gtk.Label(label="Формат: 7:30, 7.5 или 450m"))
+        box.add(Gtk.Label(label=hint))
+        entry = Gtk.Entry(text=fmt(cur))
+        box.add(entry)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            s = entry.get_text().strip()
+            if not s:
+                self.core.adjust.pop(day, None)
+            else:
+                mins = parse_hours(s)
+                if mins is None:
+                    self.error("Не понял формат. Примеры: 7:30, 7.5, 450m")
+                else:
+                    delta = mins - raw
+                    if abs(delta) < 0.01:
+                        self.core.adjust.pop(day, None)
+                    else:
+                        self.core.adjust[day] = delta
+            self.core.save()
+            self.refresh()
+        d.destroy()
+
+    def error(self, msg):
+        m = Gtk.MessageDialog(transient_for=self.window, modal=True,
+                              message_type=Gtk.MessageType.WARNING,
+                              buttons=Gtk.ButtonsType.OK, text=msg)
+        m.run()
+        m.destroy()
+
+    def settings_dialog(self):
+        d = Gtk.Dialog(title="Настройки", transient_for=self.window, modal=True)
+        d.add_button("Готово", Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(14)
+
+        cb_w = Gtk.CheckButton(label="Виджет на экране")
+        cb_w.set_active(bool(self.widget))
+        box.add(cb_w)
+
+        box.add(Gtk.Label(label="Прозрачность виджета", xalign=0))
+        adj = Gtk.Adjustment(value=float(self.core.settings.get("alpha", 0.92)) * 100,
+                             lower=35, upper=100, step_increment=1)
+        sc = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj)
+        sc.set_digits(0)
+        sc.set_size_request(280, -1)
+        box.add(sc)
+
+        cb_a = Gtk.CheckButton(label="Запускать при входе в систему")
+        cb_a.set_active(self.autostart_on())
+        box.add(cb_a)
+
+        box.add(Gtk.Label(
+            label="Глобальная горячая клавиша задаётся в параметрах системы:\n"
+                  "команда  worktimer --toggle", xalign=0))
+        d.show_all()
+        d.run()
+
+        if cb_w.get_active() != bool(self.widget):
+            self.toggle_widget()
+        if cb_a.get_active() != self.autostart_on():
+            self.toggle_autostart()
+        self.core.settings["alpha"] = "%.3f" % (adj.get_value() / 100.0)
+        save_settings(self.core.settings)
+        if self.widget:
+            self.widget.queue_draw()
+        d.destroy()
+
+    def export_dialog(self):
+        d = Gtk.Dialog(title="Экспорт за период", transient_for=self.window, modal=True)
+        d.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Экспорт", Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(12)
+        box.add(Gtk.Label(label="Начало периода"))
+        c1 = Gtk.Calendar()
+        box.add(c1)
+        box.add(Gtk.Label(label="Конец периода"))
+        c2 = Gtk.Calendar()
+        box.add(c2)
+        today = dt.date.today()
+        first = today.replace(day=1)
+        for c, day in ((c1, first), (c2, today)):
+            c.select_month(day.month - 1, day.year)
+            c.select_day(day.day)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            y1, m1, d1 = c1.get_date()
+            y2, m2, d2 = c2.get_date()
+            a, b = dt.date(y1, m1 + 1, d1), dt.date(y2, m2 + 1, d2)
+            if a > b:
+                a, b = b, a
+            d.destroy()
+            self.do_export(a, b)
+        else:
+            d.destroy()
+
+    def do_export(self, a, b):
+        ch = Gtk.FileChooserDialog(title="Сохранить CSV", transient_for=self.window,
+                                   action=Gtk.FileChooserAction.SAVE)
+        ch.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить", Gtk.ResponseType.OK)
+        ch.set_current_name("worktime_%s_%s.csv" % (a.isoformat(), b.isoformat()))
+        ch.set_do_overwrite_confirmation(True)
+        if ch.run() == Gtk.ResponseType.OK:
+            path = ch.get_filename()
+            ch.destroy()
+            m = self.core.day_map()
+            total, worked = 0.0, 0
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                wr = csv.writer(f, delimiter=";")
+                wr.writerow(["Дата", "День недели", "Часы (чч:мм)", "Часы (десятичные)"])
+                day = a
+                while day <= b:
+                    v = m.get(day, 0.0)
+                    if v > 0:
+                        total += v
+                        worked += 1
+                        wr.writerow([day.strftime("%d.%m.%Y"), RU_DOW[day.weekday()],
+                                     fmt(v), ("%.2f" % (v / 60.0)).replace(".", ",")])
+                    day += dt.timedelta(days=1)
+                wr.writerow([])
+                wr.writerow(["Период", "%s — %s" % (a.strftime("%d.%m.%Y"),
+                                                    b.strftime("%d.%m.%Y")), "", ""])
+                wr.writerow(["Рабочих дней", worked, "", ""])
+                wr.writerow(["ИТОГО", "", fmt(total),
+                             ("%.2f" % (total / 60.0)).replace(".", ",")])
+        else:
+            ch.destroy()
+
+    def quit(self):
+        if self.core.running:
+            self.core.close_segment()
+        self.core.save()
+        Gtk.main_quit()
+
+
+def parse_hours(s):
+    s = s.strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        if s.lower().endswith("m"):
+            return float(s[:-1])
+        if ":" in s:
+            h, m = s.split(":", 1)
+            return int(h) * 60 + int(m)
+        return float(s) * 60
+    except ValueError:
+        return None
+
+
+def main():
+    # worktimer --toggle: переключить учёт из горячей клавиши системы
+    if "--toggle" in sys.argv:
+        core = Core()
+        core.toggle()
+        return 0
+    if "--version" in sys.argv:
+        print("WorkTimer " + VERSION)
+        return 0
+
+    app = App()
+    if "--hidden" not in sys.argv:
+        app.show_window()
+
+    def on_sigterm():
+        app.quit()
+        return False
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, 15, on_sigterm)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, 2, on_sigterm)
+
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -6,3 +6,5 @@ obj/
 bin/
 Thumbs.db
 desktop.ini
+linux/build/
+__pycache__/
