@@ -55,7 +55,7 @@ License: MIT
  THE SOFTWARE.
 EOF
 
-printf '%s (%s) unstable; urgency=low\n\n  * Первая сборка порта под Linux.\n\n -- shhmft <lutcenko0710@gmail.com>  %s\n' \
+printf '%s (%s) unstable; urgency=low\n\n  * Исправлено управление горячей клавишей и запуск второго экземпляра.\n\n -- shhmft <lutcenko0710@gmail.com>  %s\n' \
   "$PKG" "$VERSION" "$(date -R)" > "$OUT/changelog"
 gzip -9 -n -c "$OUT/changelog" > "$ROOT/usr/share/doc/$PKG/changelog.Debian.gz"
 chmod 0644 "$ROOT/usr/share/doc/$PKG/changelog.Debian.gz"

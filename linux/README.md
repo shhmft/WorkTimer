@@ -5,6 +5,8 @@
 
 ## Установка
 
+Скачай [`worktimer_1.1.1_all.deb`](https://github.com/shhmft/WorkTimer/releases/download/v1.1.1/worktimer_1.1.1_all.deb), затем в папке с файлом выполни:
+
 ```bash
 sudo apt install ./worktimer_1.1.1_all.deb
 ```
