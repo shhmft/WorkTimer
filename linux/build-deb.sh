@@ -2,7 +2,7 @@
 # Сборка deb-пакета WorkTimer. Запускать из папки linux/:  ./build-deb.sh
 set -e
 
-VERSION="1.0.0"
+VERSION="1.1.1"
 PKG="worktimer"
 ARCH="all"
 HERE="$(cd "$(dirname "$0")" && pwd)"

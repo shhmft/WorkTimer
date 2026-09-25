@@ -6,14 +6,14 @@
 ## Установка
 
 ```bash
-sudo apt install ./worktimer_1.0.0_all.deb
+sudo apt install ./worktimer_1.1.1_all.deb
 ```
 
 `apt` сам подтянет зависимости. Если ставить через `dpkg -i`, зависимости
 придётся доставить руками:
 
 ```bash
-sudo dpkg -i worktimer_1.0.0_all.deb
+sudo dpkg -i worktimer_1.1.1_all.deb
 sudo apt -f install
 ```
 
@@ -45,7 +45,8 @@ sudo apt -f install
 worktimer --toggle
 ```
 
-Это переключает учёт в уже запущенной программе (старт или пауза).
+Это переключает учёт в уже запущенной программе (старт или пауза). Повторный
+запуск приложения откроет существующее окно вместо второго экземпляра.
 
 ### GNOME и значок в лотке
 

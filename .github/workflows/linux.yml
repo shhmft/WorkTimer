@@ -1,0 +1,40 @@
+name: Linux package and smoke test
+
+on:
+  push:
+    branches: [main, codex/linux-qa]
+    paths:
+      - linux/**
+      - .github/workflows/linux.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test and package dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 xvfb xauth fakeroot dpkg-dev
+      - name: Check source and core logic
+        run: |
+          /usr/bin/python3 -m py_compile linux/worktimer
+          /usr/bin/python3 linux/test-core.py
+          bash -n linux/build-deb.sh
+      - name: Build and install Debian package
+        run: |
+          bash linux/build-deb.sh
+          test "$(dpkg-deb -f linux/build/worktimer_1.1.1_all.deb Package)" = worktimer
+          test "$(dpkg-deb -f linux/build/worktimer_1.1.1_all.deb Version)" = 1.1.1
+          sudo apt-get install -y ./linux/build/worktimer_1.1.1_all.deb
+      - name: Smoke test installed application and hotkey command
+        run: timeout 45s xvfb-run -a bash linux/test-gui.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worktimer-linux-deb
+          path: linux/build/worktimer_1.1.1_all.deb
+          if-no-files-found: error

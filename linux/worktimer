@@ -10,6 +10,7 @@ import sys
 import math
 import csv
 import datetime as dt
+import signal
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -26,7 +27,7 @@ for ns, ver in (("AyatanaAppIndicator3", "0.1"), ("AppIndicator3", "0.1")):
         continue
 
 APP = "worktimer"
-VERSION = "1.0.0"
+VERSION = "1.1.1"
 
 # ---------------------------------------------------------------- палитра
 BG = (13 / 255, 15 / 255, 22 / 255)
@@ -72,6 +73,54 @@ SESSIONS = lambda: os.path.join(data_dir(), "sessions.csv")      # noqa: E731
 ADJUST = lambda: os.path.join(data_dir(), "adjustments.csv")      # noqa: E731
 SETTINGS = lambda: os.path.join(cfg_dir(), "settings.ini")        # noqa: E731
 ERRLOG = lambda: os.path.join(data_dir(), "errors.log")           # noqa: E731
+
+
+def instance_path():
+    return os.path.join(data_dir(), ".instance.lock")
+
+
+def acquire_instance():
+    """Держим блокировку всё время работы GTK, чтобы данные писал один процесс."""
+    import fcntl
+    fd = os.open(instance_path(), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode("ascii"))
+    return fd
+
+
+def signal_instance(signum):
+    """Посылаем команду только процессу, который держит блокировку."""
+    import fcntl
+    try:
+        fd = os.open(instance_path(), os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            return False
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            pid = int(os.read(fd, 32).decode("ascii"))
+        except ValueError:
+            return False
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            return False
+        return True
+    finally:
+        os.close(fd)
 
 last_error = [None]
 
@@ -1011,27 +1060,48 @@ def parse_hours(s):
 
 
 def main():
-    # worktimer --toggle: переключить учёт из горячей клавиши системы
-    if "--toggle" in sys.argv:
-        core = Core()
-        core.toggle()
-        return 0
     if "--version" in sys.argv:
         print("WorkTimer " + VERSION)
         return 0
 
-    app = App()
-    if "--hidden" not in sys.argv:
-        app.show_window()
+    if "--toggle" in sys.argv:
+        if signal_instance(signal.SIGUSR1):
+            return 0
+        print("WorkTimer не запущен", file=sys.stderr)
+        return 1
 
-    def on_sigterm():
-        app.quit()
-        return False
-    GLib.unix_signal_add(GLib.PRIORITY_HIGH, 15, on_sigterm)
-    GLib.unix_signal_add(GLib.PRIORITY_HIGH, 2, on_sigterm)
+    instance_fd = acquire_instance()
+    if instance_fd is None:
+        signal_instance(signal.SIGUSR2)
+        return 0
 
-    Gtk.main()
-    return 0
+    try:
+        app = App()
+        if "--hidden" not in sys.argv:
+            app.show_window()
+
+        def on_toggle():
+            app.core.toggle()
+            app.refresh()
+            return True
+
+        def on_show():
+            app.show_window()
+            return True
+
+        def on_sigterm():
+            app.quit()
+            return False
+
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, on_toggle)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR2, on_show)
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, on_sigterm)
+        GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, on_sigterm)
+
+        Gtk.main()
+        return 0
+    finally:
+        os.close(instance_fd)
 
 
 if __name__ == "__main__":
