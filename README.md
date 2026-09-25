@@ -7,7 +7,7 @@
 
 ### [⬇ Скачать WorkTimer.exe](https://github.com/shhmft/WorkTimer/releases/latest/download/WorkTimer.exe)
 
-![exe 102 КБ](https://img.shields.io/badge/exe-102_КБ-7C5CFF?style=flat-square)
+![exe 106 КБ](https://img.shields.io/badge/exe-106_КБ-7C5CFF?style=flat-square)
 ![RAM 9 МБ](https://img.shields.io/badge/RAM-9_МБ-22D3EE?style=flat-square)
 ![CPU 0%](https://img.shields.io/badge/CPU_в_простое-0%25-2DD489?style=flat-square)
 ![Без зависимостей](https://img.shields.io/badge/зависимости-нет-64748B?style=flat-square)
@@ -37,7 +37,7 @@
 | ⌨️ **Ctrl + Alt + Space** | глобальный старт и пауза, не отрывая рук |
 | ⚙️ **Настройки** | виджет, его прозрачность, горячая клавиша, автозапуск |
 | 🚀 **Автозапуск с Windows** | галочка в меню трея |
-| 💾 **Данные не теряются** | автосохранение каждые 30 секунд |
+| 💾 **Данные не теряются** | автосохранение каждые 15 секунд во время учёта |
 | 🌙 **Полностью тёмный интерфейс** | безрамочное скруглённое окно, всё нарисовано вручную |
 
 ## Установка
@@ -47,6 +47,8 @@
 
 Никакого инсталлятора и рантайма — программа работает на .NET Framework 4,
 который уже встроен в каждую Windows.
+
+Для Linux есть [отдельная инструкция по установке и сборке](linux/README.md).
 
 ## Как пользоваться
 
@@ -75,7 +77,7 @@
 ```
 %APPDATA%\WorkTimer\
 ├─ sessions.csv    отрезки времени: начало|конец (ISO)
-├─ overrides.csv   ручные правки: дата|минуты
+├─ adjustments.csv ручные правки: дата|минуты
 └─ settings.ini    состояние и позиция виджета
 ```
 
