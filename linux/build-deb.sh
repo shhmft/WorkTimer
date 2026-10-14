@@ -2,7 +2,7 @@
 # Сборка deb-пакета WorkTimer. Запускать из папки linux/:  ./build-deb.sh
 set -e
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 PKG="worktimer"
 ARCH="all"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -55,7 +55,7 @@ License: MIT
  THE SOFTWARE.
 EOF
 
-printf '%s (%s) unstable; urgency=low\n\n  * Исправлено управление горячей клавишей и запуск второго экземпляра.\n\n -- shhmft <lutcenko0710@gmail.com>  %s\n' \
+printf '%s (%s) unstable; urgency=low\n\n  * Добавлены работы с названиями, независимые параллельные таймеры и экспорт по работам.\n\n -- shhmft <lutcenko0710@gmail.com>  %s\n' \
   "$PKG" "$VERSION" "$(date -R)" > "$OUT/changelog"
 gzip -9 -n -c "$OUT/changelog" > "$ROOT/usr/share/doc/$PKG/changelog.Debian.gz"
 chmod 0644 "$ROOT/usr/share/doc/$PKG/changelog.Debian.gz"
@@ -72,7 +72,7 @@ Maintainer: shhmft <lutcenko0710@gmail.com>
 Installed-Size: $(du -ks "$ROOT/usr" | cut -f1)
 Description: Учёт рабочих часов в системном лотке
  Небольшая утилита: считает отработанное время, показывает итоги по дням
- и за месяц, умеет полупрозрачный виджет поверх окон и выгрузку CSV
+ и за месяц по отдельным работам, параллельные таймеры, виджет и выгрузку CSV
  за произвольный период.
  .
  Данные лежат в ~/.local/share/worktimer обычным текстом.

@@ -42,7 +42,9 @@ import sys
 
 rows = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 assert len(rows) == 1, rows
-start, end = (dt.datetime.fromisoformat(value) for value in rows[0].split("|"))
+fields = rows[0].split("|")
+assert len(fields) == 3 and fields[2] == 'default', fields
+start, end = (dt.datetime.fromisoformat(value) for value in fields[:2])
 assert end > start, (start, end)
 PY
 

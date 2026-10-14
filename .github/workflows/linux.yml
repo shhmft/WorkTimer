@@ -1,11 +1,10 @@
-name: Linux package and smoke test
+name: Windows and Linux builds
 
 on:
   push:
-    branches: [main, codex/linux-qa]
-    paths:
-      - linux/**
-      - .github/workflows/linux.yml
+    branches: [main, 'codex/**']
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -28,13 +27,50 @@ jobs:
       - name: Build and install Debian package
         run: |
           bash linux/build-deb.sh
-          test "$(dpkg-deb -f linux/build/worktimer_1.1.1_all.deb Package)" = worktimer
-          test "$(dpkg-deb -f linux/build/worktimer_1.1.1_all.deb Version)" = 1.1.1
-          sudo apt-get install -y ./linux/build/worktimer_1.1.1_all.deb
+          test "$(dpkg-deb -f linux/build/worktimer_1.2.0_all.deb Package)" = worktimer
+          test "$(dpkg-deb -f linux/build/worktimer_1.2.0_all.deb Version)" = 1.2.0
+          sudo apt-get install -y ./linux/build/worktimer_1.2.0_all.deb
       - name: Smoke test installed application and hotkey command
-        run: timeout 45s xvfb-run -a bash linux/test-gui.sh
+        run: |
+          timeout 45s xvfb-run -a bash linux/test-gui.sh
+          timeout 45s xvfb-run -a /usr/bin/python3 linux/test-projects-gui.py
       - uses: actions/upload-artifact@v4
         with:
           name: worktimer-linux-deb
-          path: linux/build/worktimer_1.1.1_all.deb
+          path: linux/build/worktimer_1.2.0_all.deb
           if-no-files-found: error
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check independent timers and persistence
+        shell: powershell
+        run: ./tests/run.ps1
+      - name: Build Windows executable
+        shell: cmd
+        run: build.cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: worktimer-windows-exe
+          path: WorkTimer.exe
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish tested Windows and Linux builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f release-assets/WorkTimer.exe
+          test -f release-assets/worktimer_1.2.0_all.deb
+          gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag \
+            --title "WorkTimer $GITHUB_REF_NAME" --notes-file CHANGELOG.md

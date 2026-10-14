@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Проверка ядра linux-версии без GTK: подменяем gi заглушками."""
 import sys, os, types, datetime as dt, importlib.util, tempfile
+import importlib.machinery
 
 # --- заглушки вместо графики ---
 gi = types.ModuleType("gi")
@@ -101,5 +102,76 @@ check("перезапись поверх", open(p, encoding="utf-8").read(), "в
 check("временный файл убран", os.path.exists(p + ".tmp"), False)
 
 print()
+print("7. независимые работы и совместимость с Windows")
+os.environ["XDG_DATA_HOME"] = os.path.join(tmp, "parallel-data")
+os.environ["XDG_CONFIG_HOME"] = os.path.join(tmp, "parallel-cfg")
+with open(wt.SESSIONS(), "w", encoding="utf-8-sig") as f:
+    f.write("%s|%s\n" % (base.isoformat(), (base + dt.timedelta(hours=1)).isoformat()))
+with open(wt.ADJUST(), "w", encoding="utf-8-sig") as f:
+    f.write("%s|15\n" % d.isoformat())
+c = wt.Core()
+first = c.current
+check("старые данные в общей работе", wt.fmt(c.today()), "1:15")
+second = c.add_project('Проект; "Дом" | фасад')
+c.toggle(first)
+first.run_start = dt.datetime.now() - dt.timedelta(minutes=10)
+c.toggle(second)
+second.run_start = dt.datetime.now() - dt.timedelta(minutes=20)
+check("два таймера запущены", c.running_count, 2)
+check("часы первой работы", wt.fmt(c.day_map(first)[d]), "1:25")
+check("часы второй работы", wt.fmt(c.today()), "0:20")
+c.select(first)
+check("смена работы не останавливает таймеры", c.running_count, 2)
+c.save(); c.save()
+check("автосохранение без дублей", len(wt.load_segments()), 3)
+c.toggle(first)
+check("пауза одной не мешает второй", second.run_start is not None, True)
+c.stop()
+check("стоп сбрасывает только свою сессию", first.session_accum, 0.0)
+check("стоп сохраняет часы", wt.fmt(c.today()), "1:25")
+c.last_save = dt.datetime.now() - dt.timedelta(seconds=20)
+fake_app = object.__new__(wt.App)
+fake_app.core = c
+fake_app.refresh = lambda: None
+fake_app.tick()
+check("фоновая работа автосохраняется", (dt.datetime.now() - c.last_save).total_seconds() < 1, True)
+c.select(second)
+c.toggle()
+c.adjust[d] = 30
+check("поправка второй работы", wt.fmt(c.today()), "0:50")
+check("поправка не затрагивает первую", wt.fmt(c.day_map(first)[d]), "1:25")
+night = base.replace(hour=23) - dt.timedelta(days=2)
+c.segments.append((night, night + dt.timedelta(hours=3), second.id))
+check("ночная работа до полуночи", wt.fmt(c.day_map()[d - dt.timedelta(days=2)]), "1:00")
+check("ночная работа после полуночи", wt.fmt(c.day_map()[d - dt.timedelta(days=1)]), "2:00")
+check("ночная работа изолирована", d - dt.timedelta(days=1) in c.day_map(first), False)
+exported = c.export_csv(d - dt.timedelta(days=2), d)
+check("CSV экранирует название", '"Проект; ""Дом"" | фасад"' in exported, True)
+check("CSV итог выбранной работы", 'ИТОГО;;;3:50;3,83' in exported, True)
+check("CSV ограничен периодом", (d - dt.timedelta(days=1)).strftime("%d.%m.%Y") in c.export_csv(d, d), False)
+c.rename_project("Дом на берегу")
+check("переименование сохраняет часы", wt.fmt(c.today()), "0:50")
+c.save()
+restored = wt.Core()
+check("выбор работы восстановлен", restored.current.id, second.id)
+check("название восстановлено", restored.current.name, "Дом на берегу")
+check("часы восстановлены", wt.fmt(restored.today()), "0:50")
+check("поправка общей работы восстановлена", restored.projects[0].adjust[d], 15.0)
+check("после перезапуска счёт стоит", restored.any_running, False)
+for name in ("", " " * 2, "Общая работа", "a" * 101, "a\nb"):
+    try:
+        c.add_project(name)
+        rejected = False
+    except ValueError:
+        rejected = True
+    check("недопустимое название %r" % name[:20], rejected, True)
+c.toggle(first); c.toggle(second)
+c.pause_all()
+check("пауза всех работ", c.running_count, 0)
+# Windows writes ISO datetimes with offsets and seven fractional digits.
+with open(wt.SESSIONS(), "w", encoding="utf-8-sig") as f:
+    f.write("%sT08:00:00.1234567+03:00|%sT09:00:00.1234567+03:00|default\n" % (d, d))
+check("ISO Windows читается в Linux", wt.fmt(wt.Core().day_map(first)[d]), "1:15")
+
 print("итого: %d успешно, %d провалено" % (ok, fail))
 sys.exit(1 if fail else 0)
