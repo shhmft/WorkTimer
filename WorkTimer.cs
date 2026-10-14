@@ -11,16 +11,17 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
 
 namespace WorkTimer
 {
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            if (args.Length == 5 && args[0] == "--apply-update") { Updates.Apply(args); return; }
             bool created;
             using (Mutex mtx = new Mutex(true, "WorkTimerSingleInstance_9F3A", out created))
             {
@@ -823,6 +824,10 @@ namespace WorkTimer
         HudWidget hud;
         Dictionary<string, string> settings = new Dictionary<string, string>();
         System.Windows.Forms.Timer timer;
+        ToolStripMenuItem miUpdate, miAutoUpdate;
+        bool updateBusy;
+        UpdateRelease pendingUpdate;
+        DateTime updateCheckAfter = DateTime.UtcNow.AddSeconds(5);
 
         string monthTitle = "", monthTotal = "0:00", statsLine = "";
 
@@ -853,6 +858,15 @@ namespace WorkTimer
         internal bool HotkeyOn
         {
             get { string v; return settings.TryGetValue("hotkey", out v) && v == "1"; }
+        }
+
+        internal bool AutoUpdates
+        { get { string value; return !settings.TryGetValue("updates", out value) || value != "0"; } }
+        internal void SetAutoUpdates(bool value)
+        {
+            settings["updates"] = value ? "1" : "0";
+            Store.SaveSettings(settings);
+            if (miAutoUpdate != null) miAutoUpdate.Checked = value;
         }
 
         internal void SetHotkey(bool on)
@@ -941,6 +955,15 @@ namespace WorkTimer
                 WorkProject saved = projects.Find(delegate(WorkProject p) { return p.Id == selected; });
                 if (saved != null) currentProject = saved;
             }
+            string[] startupArgs = Environment.GetCommandLineArgs();
+            if (Array.IndexOf(startupArgs, "--updated") >= 0)
+            {
+                string resume;
+                if (settings.TryGetValue("updateResume", out resume))
+                    foreach (WorkProject p in projects)
+                        if (Array.IndexOf(resume.Split(','), p.Id) >= 0) p.RunStart = DateTime.Now;
+                settings.Remove("updateResume"); Store.SaveSettings(settings);
+            }
             BuildIcons();
             BuildTray();
             BuildWindow();
@@ -967,6 +990,9 @@ namespace WorkTimer
 
             UpdateAll();
             TrimMemory();
+            if (Array.IndexOf(startupArgs, "--update-failed") >= 0)
+                MessageBox.Show("Не удалось установить обновление. Запущена прежняя версия; часы сохранены. Подробности в errors.log.",
+                    "WorkTimer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         protected override CreateParams CreateParams
@@ -1083,12 +1109,20 @@ namespace WorkTimer
             menu.Items.Add(miWidget);
             menu.Items.Add(miAutostart);
             menu.Items.Add(new ToolStripSeparator());
+            miUpdate = new ToolStripMenuItem("Проверить обновления (" + Updates.Current + ")", null,
+                delegate { if (pendingUpdate != null) OfferUpdate(); else CheckUpdates(true); });
+            miAutoUpdate = new ToolStripMenuItem("Проверять обновления автоматически", null,
+                delegate { SetAutoUpdates(!AutoUpdates); });
+            miAutoUpdate.Checked = AutoUpdates;
+            menu.Items.Add(miUpdate); menu.Items.Add(miAutoUpdate);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("Выход", null, delegate { ExitApp(); }));
 
             tray = new NotifyIcon();
             tray.Icon = icoIdle;
             tray.Visible = true;
             tray.ContextMenuStrip = menu;
+            tray.BalloonTipClicked += delegate { if (pendingUpdate != null && !updateBusy) OfferUpdate(); };
             tray.Text = "WorkTimer";
             tray.MouseClick += delegate(object s, MouseEventArgs e)
             {
@@ -1724,6 +1758,14 @@ namespace WorkTimer
 
         void OnTick(object sender, EventArgs e)
         {
+            if (AutoUpdates && !updateBusy && DateTime.UtcNow >= updateCheckAfter)
+            {
+                updateCheckAfter = DateTime.UtcNow.AddHours(1);
+                string last; DateTime at;
+                if (!settings.TryGetValue("updateCheck", out last) ||
+                    !DateTime.TryParse(last, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out at) ||
+                    at > DateTime.UtcNow || DateTime.UtcNow - at >= TimeSpan.FromHours(24)) CheckUpdates(false);
+            }
             if (AnyRunning && (DateTime.Now - lastSave).TotalSeconds >= 15) SaveNow();
 
             // когда окно спрятано и счёт стоит, показывать нечего — просыпаемся
@@ -2076,6 +2118,111 @@ namespace WorkTimer
         }
 
         // ---------- автозапуск ----------
+        void UpdateCallback(Action action)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            try { BeginInvoke(action); } catch (InvalidOperationException) { }
+        }
+
+        void CheckUpdates(bool manual)
+        {
+            if (updateBusy) return;
+            updateBusy = true; miUpdate.Enabled = false;
+            settings["updateCheck"] = DateTime.UtcNow.ToString("o"); Store.SaveSettings(settings);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    UpdateRelease release = Updates.Check();
+                    UpdateCallback(delegate
+                    {
+                        updateBusy = false; miUpdate.Enabled = true; pendingUpdate = release;
+                        miUpdate.Text = release == null ? "Проверить обновления (" + Updates.Current + ")" : "Обновить до " + release.Version;
+                        if (release == null)
+                        {
+                            if (manual) MessageBox.Show("Установлена версия " + Updates.Current + ". Более новой версии на GitHub нет.", "WorkTimer");
+                        }
+                        else if (manual) OfferUpdate();
+                        else
+                        {
+                            if (!AutoUpdates) return;
+                            string notified;
+                            if (settings.TryGetValue("updateNotified", out notified) && notified == release.Version.ToString()) return;
+                            settings["updateNotified"] = release.Version.ToString(); Store.SaveSettings(settings);
+                            tray.BalloonTipTitle = "WorkTimer: доступна версия " + release.Version;
+                            tray.BalloonTipText = "Нажмите, чтобы скачать и установить обновление.";
+                            tray.BalloonTipIcon = ToolTipIcon.Info; tray.ShowBalloonTip(15000);
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Store.Log("проверка обновлений", ex);
+                    UpdateCallback(delegate
+                    {
+                        updateBusy = false; miUpdate.Enabled = true;
+                        if (manual) MessageBox.Show("Не удалось проверить обновления. Проверьте интернет и попробуйте ещё раз.\r\n" + ex.Message, "WorkTimer");
+                    });
+                }
+            });
+        }
+
+        void OfferUpdate()
+        {
+            if (updateBusy || pendingUpdate == null) return;
+            UpdateRelease release = pendingUpdate;
+            if (MessageBox.Show("Доступна версия " + release.Version + ". Скачать и установить?\r\n" +
+                "Часы сохранятся, запущенные работы продолжат учёт после перезапуска.", "Обновление WorkTimer",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
+            updateBusy = true; miUpdate.Enabled = false; miUpdate.Text = "Скачивается обновление…";
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    string stage = Updates.Download(release);
+                    UpdateCallback(delegate
+                    {
+                        try { InstallUpdate(stage, release); }
+                        catch (Exception ex) { UpdateFailed(ex); }
+                    });
+                }
+                catch (Exception ex) { UpdateCallback(delegate { UpdateFailed(ex); }); }
+            });
+        }
+
+        void UpdateFailed(Exception ex)
+        {
+            Store.Log("обновление", ex);
+            updateBusy = false; miUpdate.Enabled = true; miUpdate.Text = "Обновить до " + pendingUpdate.Version;
+            MessageBox.Show("Не удалось обновить таймер. Часы продолжают считаться.\r\n" + ex.Message,
+                "WorkTimer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        void InstallUpdate(string stage, UpdateRelease release)
+        {
+            string target = Application.ExecutablePath;
+            Version downloaded;
+            if (!Version.TryParse(System.Diagnostics.FileVersionInfo.GetVersionInfo(stage).FileVersion, out downloaded) ||
+                new Version(downloaded.Major, downloaded.Minor, downloaded.Build) != release.Version)
+                throw new InvalidDataException("Версия скачанного приложения не совпадает с релизом.");
+            string probe = target + ".update-probe-" + Guid.NewGuid().ToString("N");
+            using (FileStream file = new FileStream(probe, FileMode.CreateNew)) { }
+            File.Delete(probe);
+            string helper = Path.Combine(Store.Dir, "updates", "helper-" + Guid.NewGuid().ToString("N") + ".exe");
+            File.Copy(target, helper);
+            List<string> resume = new List<string>();
+            foreach (WorkProject p in projects) if (p.RunStart.HasValue) resume.Add(p.Id);
+            settings["updateResume"] = string.Join(",", resume.ToArray()); Store.SaveSettings(settings);
+            SaveNow();
+            if (saveBroken) throw new IOException("Не удалось сохранить часы; обновление отложено.");
+            string arguments = "--apply-update " + System.Diagnostics.Process.GetCurrentProcess().Id + " " +
+                Updates.QuoteArg(target) + " " + Updates.QuoteArg(stage) + " " + Updates.QuoteArg(release.Digest);
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(helper, arguments);
+            start.UseShellExecute = false; start.CreateNoWindow = true;
+            System.Diagnostics.Process.Start(start);
+            ExitApp();
+        }
+
         bool IsAutostart()
         {
             try
@@ -2731,10 +2878,10 @@ namespace WorkTimer
     class SettingsDialog : Form
     {
         readonly TrayApp app;
-        GButton bWidget, bHotkey, bAuto, bClose, bDone;
+        GButton bWidget, bHotkey, bAuto, bClose, bDone, bUpdates;
         GSlider slider;
 
-        const int W = 420, H = 356;
+        const int W = 420, H = 404;
 
         public SettingsDialog(TrayApp owner)
         {
@@ -2771,6 +2918,8 @@ namespace WorkTimer
 
             bAuto = Mk(GButton.Kind.Ghost, "", W - 140, 244, 116, 34);
             bAuto.Click += delegate { app.ToggleAutostartPub(); Sync(); };
+            bUpdates = Mk(GButton.Kind.Ghost, "", W - 140, 290, 116, 34);
+            bUpdates.Click += delegate { app.SetAutoUpdates(!app.AutoUpdates); Sync(); };
 
             bDone = Mk(GButton.Kind.Primary, "Готово", 20, H - 52, 120, 36);
             bDone.Font = Skin.F(9.5f, FontStyle.Bold);
@@ -2818,6 +2967,7 @@ namespace WorkTimer
             Mark(bWidget, app.WidgetOn);
             Mark(bHotkey, app.HotkeyOn);
             Mark(bAuto, app.AutostartOn);
+            Mark(bUpdates, app.AutoUpdates);
             slider.Value = (float)((app.WidgetAlpha - 0.35) / 0.65);
             slider.Invalidate();
             Invalidate();
@@ -2849,6 +2999,7 @@ namespace WorkTimer
 
             Row(g, 198, "Ctrl + Alt + Space", "глобально: старт и пауза, не открывая окно");
             Row(g, 244, "Запускать с Windows", "стартовать вместе с системой");
+            Row(g, 290, "Проверять обновления", "раз в сутки · версия " + Updates.Current);
 
             using (Pen p = new Pen(Color.FromArgb(32, 38, 54), 1f))
             {

@@ -14,6 +14,14 @@ import signal
 import base64
 import uuid
 import io
+import threading
+import shutil
+import subprocess
+import shlex
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append("/usr/lib/worktimer")
+import worktimer_updates as updates
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -31,7 +39,7 @@ for ns, ver in (("AyatanaAppIndicator3", "0.1"), ("AppIndicator3", "0.1")):
         continue
 
 APP = "worktimer"
-VERSION = "1.2.0"
+VERSION = updates.VERSION
 
 # ---------------------------------------------------------------- палитра
 BG = (13 / 255, 15 / 255, 22 / 255)
@@ -330,6 +338,12 @@ class Core:
             p.adjust = adjustments.get(p.id, {})
         self.settings = load_settings()
         self.current = projects.get(self.settings.get("project"), self.projects[0])
+        if "--updated" in sys.argv:
+            resume = self.settings.pop("updateResume", "").split(",")
+            for p in self.projects:
+                if p.id in resume:
+                    p.run_start = dt.datetime.now()
+            save_settings(self.settings)
         self.save_broken = False
         self.last_save = dt.datetime.now()
 
@@ -993,6 +1007,9 @@ class Widget(Gtk.Window):
 class App:
     def __init__(self):
         self.core = Core()
+        self.update_busy = False
+        self.pending_update = None
+        self.closing = False
         self.window = MainWindow(self)
         self.widget = None
         self.ind = None
@@ -1001,6 +1018,8 @@ class App:
         if self.core.settings.get("widget", "1") != "0":
             self.toggle_widget()
         GLib.timeout_add(1000, self.tick)
+        GLib.timeout_add(5000, self.startup_update)
+        GLib.timeout_add_seconds(3600, self.auto_update)
 
     # ---- трей ----
     def build_tray(self):
@@ -1037,6 +1056,14 @@ class App:
         mi_auto = Gtk.MenuItem(label="Запускать при входе")
         mi_auto.connect("activate", lambda *_: self.toggle_autostart())
         self.menu.append(mi_auto)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        self.mi_update = Gtk.MenuItem(label="Проверить обновления (" + VERSION + ")")
+        self.mi_update.connect("activate", lambda *_: self.offer_update() if self.pending_update else self.check_updates(True))
+        self.menu.append(self.mi_update)
+        self.mi_auto_update = Gtk.CheckMenuItem(label="Проверять обновления автоматически")
+        self.mi_auto_update.set_active(self.core.settings.get("updates", "1") != "0")
+        self.mi_auto_update.connect("toggled", self.toggle_auto_updates)
+        self.menu.append(self.mi_auto_update)
         self.menu.append(Gtk.SeparatorMenuItem())
         mi_quit = Gtk.MenuItem(label="Выход")
         mi_quit.connect("activate", lambda *_: self.quit())
@@ -1142,6 +1169,143 @@ class App:
                         "X-GNOME-Autostart-enabled=true\nTerminal=false\n")
 
     # ---- диалоги ----
+    def toggle_auto_updates(self, item):
+        self.core.settings["updates"] = "1" if item.get_active() else "0"
+        save_settings(self.core.settings)
+
+    def auto_update(self):
+        if self.closing or self.core.settings.get("updates", "1") == "0" or self.update_busy:
+            return True
+        try:
+            last = dt.datetime.fromisoformat(self.core.settings.get("updateCheck", ""))
+            age = dt.datetime.utcnow() - last
+            due = age.total_seconds() < 0 or age.total_seconds() >= 86400
+        except ValueError:
+            due = True
+        if due:
+            self.check_updates(False)
+        return True
+
+    def startup_update(self):
+        self.auto_update()
+        return False
+
+    def update_worker(self, work, done):
+        self.update_busy = True
+        self.mi_update.set_sensitive(False)
+
+        def finish(result, error):
+            if self.closing:
+                return False
+            self.update_busy = False
+            self.mi_update.set_sensitive(True)
+            done(result, error)
+            return False
+
+        def worker():
+            try:
+                result = work()
+                GLib.idle_add(finish, result, None)
+            except Exception as exc:
+                log_error("обновление", exc)
+                GLib.idle_add(finish, None, exc)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def check_updates(self, manual=False):
+        if self.update_busy:
+            return
+        self.core.settings["updateCheck"] = dt.datetime.utcnow().isoformat()
+        save_settings(self.core.settings)
+
+        def done(release, error):
+            if error:
+                if manual:
+                    self.error("Не удалось проверить обновления. Проверьте интернет и попробуйте ещё раз.\n" + str(error))
+                return
+            self.pending_update = release
+            self.mi_update.set_label("Обновить до " + release["version"] if release else
+                                     "Проверить обновления (" + VERSION + ")")
+            if not release:
+                if manual:
+                    self.error("Установлена версия %s. Более новой версии на GitHub нет." % VERSION, warning=False)
+                return
+            if not manual and self.core.settings.get("updates", "1") == "0":
+                return
+            if manual or self.core.settings.get("updateNotified") != release["version"]:
+                self.core.settings["updateNotified"] = release["version"]
+                save_settings(self.core.settings)
+                self.offer_update()
+        self.update_worker(updates.check_release, done)
+
+    def confirm_update(self, message):
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+                                   message_type=Gtk.MessageType.QUESTION,
+                                   buttons=Gtk.ButtonsType.YES_NO, text=message)
+        accepted = dialog.run() == Gtk.ResponseType.YES
+        dialog.destroy()
+        return accepted
+
+    def offer_update(self):
+        if self.update_busy or not self.pending_update:
+            return
+        release = self.pending_update
+        if not self.confirm_update("Доступна версия %s. Скачать обновление?\nЧасы продолжат считаться во время загрузки." % release["version"]):
+            return
+        self.mi_update.set_label("Скачивается обновление…")
+
+        def done(path, error):
+            self.mi_update.set_label("Обновить до " + release["version"])
+            if error:
+                self.error("Не удалось скачать обновление.\n" + str(error))
+                return
+            self.install_update(path, release)
+        self.update_worker(lambda: updates.download(release, os.path.join(data_dir(), "updates")), done)
+
+    def install_update(self, path, release):
+        try:
+            package = subprocess.check_output(["dpkg-deb", "-f", path, "Package"], text=True).strip()
+            version = subprocess.check_output(["dpkg-deb", "-f", path, "Version"], text=True).strip()
+            if package != "worktimer" or version != release["version"]:
+                raise ValueError("Скачанный пакет не соответствует релизу WorkTimer.")
+        except Exception as exc:
+            self.error(str(exc))
+            return
+        if not shutil.which("pkexec") or not shutil.which("apt-get"):
+            self.error("Обновление скачано. Установите пакет командой:\n\nsudo apt install " + shlex.quote(path), warning=False)
+            return
+        if not self.confirm_update("Обновление скачано и проверено. Установить версию %s?\nСистема запросит права администратора. После установки таймер перезапустится." % release["version"]):
+            return
+        self.mi_update.set_label("Устанавливается обновление…")
+
+        def install():
+            result = subprocess.run([shutil.which("pkexec"), shutil.which("apt-get"), "install", "-y", path],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+            if result.returncode:
+                raise RuntimeError("Установка отменена или завершилась с ошибкой.\n" + result.stderr[-1500:])
+            return True
+
+        def done(_result, error):
+            self.mi_update.set_label("Обновить до " + release["version"])
+            if error:
+                self.error(str(error))
+                return
+            resume = [p.id for p in self.core.projects if p.run_start is not None]
+            self.core.settings["updateResume"] = ",".join(resume)
+            save_settings(self.core.settings)
+            self.core.pause_all()
+            if self.core.save_broken:
+                for p in self.core.projects:
+                    if p.id in resume:
+                        p.run_start = dt.datetime.now()
+                self.error("Не удалось сохранить часы. Перезапуск отложен; обновление уже установлено.")
+                return
+            self.closing = True
+            self.window.destroy()
+            if self.widget:
+                self.widget.destroy()
+            os.execv(sys.executable, [sys.executable, "/usr/bin/worktimer", "--updated"])
+        self.update_worker(install, done)
+
     def project_dialog(self, rename=False):
         d = Gtk.Dialog(title="Название работы" if rename else "Новая работа",
                        transient_for=self.window, modal=True)
@@ -1205,9 +1369,9 @@ class App:
             self.refresh()
         d.destroy()
 
-    def error(self, msg):
+    def error(self, msg, warning=True):
         m = Gtk.MessageDialog(transient_for=self.window, modal=True,
-                              message_type=Gtk.MessageType.WARNING,
+                              message_type=Gtk.MessageType.WARNING if warning else Gtk.MessageType.INFO,
                               buttons=Gtk.ButtonsType.OK, text=msg)
         m.run()
         m.destroy()
@@ -1234,6 +1398,9 @@ class App:
         cb_a = Gtk.CheckButton(label="Запускать при входе в систему")
         cb_a.set_active(self.autostart_on())
         box.add(cb_a)
+        cb_updates = Gtk.CheckButton(label="Проверять обновления раз в сутки (версия " + VERSION + ")")
+        cb_updates.set_active(self.core.settings.get("updates", "1") != "0")
+        box.add(cb_updates)
 
         box.add(Gtk.Label(
             label="Глобальная горячая клавиша задаётся в параметрах системы:\n"
@@ -1245,6 +1412,7 @@ class App:
             self.toggle_widget()
         if cb_a.get_active() != self.autostart_on():
             self.toggle_autostart()
+        self.mi_auto_update.set_active(cb_updates.get_active())
         self.core.settings["alpha"] = "%.3f" % (adj.get_value() / 100.0)
         save_settings(self.core.settings)
         if self.widget:
@@ -1296,6 +1464,7 @@ class App:
             ch.destroy()
 
     def quit(self):
+        self.closing = True
         self.core.pause_all()
         Gtk.main_quit()
 

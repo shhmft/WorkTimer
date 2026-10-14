@@ -37,7 +37,7 @@ namespace WorkTimer
         [STAThread]
         static int Main(string[] args)
         {
-            if (args.Length == 2 && args[0] == "--reload") return CheckRestart(args[1]);
+            if (args.Length >= 2 && args[0] == "--reload") return CheckRestart(args[1], Array.IndexOf(args, "--updated") >= 0);
             string testDir = Path.Combine(Path.GetTempPath(), "WorkTimerTests-" + Guid.NewGuid().ToString("N"));
             Store.DataDirectory = testDir;
             TrayApp app = null;
@@ -49,7 +49,7 @@ namespace WorkTimer
                 File.WriteAllText(Store.SessionsFile,
                     morning.ToString("s") + "|" + morning.AddHours(1).ToString("s") + "\r\n", Encoding.UTF8);
                 File.WriteAllText(Store.AdjustFile, today.ToString("yyyy-MM-dd") + "|15\r\n", Encoding.UTF8);
-                File.WriteAllText(Store.SettingsFile, "widget=0\r\nhotkey=0\r\n", Encoding.UTF8);
+                File.WriteAllText(Store.SettingsFile, "widget=0\r\nhotkey=0\r\nupdates=0\r\n", Encoding.UTF8);
                 app = new TrayApp();
                 List<WorkProject> projects = Field<List<WorkProject>>(app, "projects");
                 WorkProject first = projects[0];
@@ -139,6 +139,21 @@ namespace WorkTimer
                     Check(child.ExitCode == 0, "Fresh process reloads work selection, hours and adjustments: " + error);
                     Console.Write(output);
                 }
+                string updateDir = Path.Combine(testDir, "resume-fixture");
+                Directory.CreateDirectory(updateDir);
+                foreach (string name in new string[] { "sessions.csv", "adjustments.csv", "projects.csv", "settings.ini" })
+                    File.Copy(Path.Combine(testDir, name), Path.Combine(updateDir, name));
+                File.AppendAllText(Path.Combine(updateDir, "settings.ini"), "updateResume=default,second\r\n", Encoding.UTF8);
+                using (System.Diagnostics.Process child = new System.Diagnostics.Process())
+                {
+                    child.StartInfo = new System.Diagnostics.ProcessStartInfo(Assembly.GetExecutingAssembly().Location,
+                        "--reload \"" + updateDir + "\" --updated");
+                    child.StartInfo.UseShellExecute = false; child.StartInfo.CreateNoWindow = true;
+                    child.StartInfo.RedirectStandardOutput = true; child.StartInfo.RedirectStandardError = true;
+                    child.Start(); string output = child.StandardOutput.ReadToEnd(); string error = child.StandardError.ReadToEnd();
+                    child.WaitForExit(); Check(child.ExitCode == 0, "Update restart resumes independent timers: " + error);
+                    Console.Write(output);
+                }
 
                 Call(app, "ToggleProject", first);
                 Call(app, "ToggleProject", second);
@@ -166,6 +181,20 @@ namespace WorkTimer
                         app.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
                         bitmap.Save(args[0], System.Drawing.Imaging.ImageFormat.Png);
                     }
+                using (SettingsDialog dialog = new SettingsDialog(app))
+                {
+                    dialog.Show(app);
+                    Application.DoEvents();
+                    Check(dialog.ClientSize.Height == 404, "Update setting fits settings window");
+                    if (args.Length > 0)
+                        using (Bitmap bitmap = new Bitmap(dialog.Width, dialog.Height))
+                        {
+                            dialog.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                            bitmap.Save(Path.Combine(Path.GetDirectoryName(args[0]), "preview-update-settings.png"),
+                                System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                    dialog.Close();
+                }
                 Check(Field<ProjectList>(app, "projectList").Rows.Count == 3, "Visible work list reflects all works");
                 Console.WriteLine("PASS: " + checks + " checks; isolated data: " + testDir);
                 return 0;
@@ -187,7 +216,7 @@ namespace WorkTimer
             }
         }
 
-        static int CheckRestart(string dir)
+        static int CheckRestart(string dir, bool updated)
         {
             Store.DataDirectory = dir;
             TrayApp app = null;
@@ -203,7 +232,9 @@ namespace WorkTimer
                 Near(85, Map(app, projects[0], DateTime.Now)[today], "Restart restores first work hours");
                 Near(50, Map(app, projects[1], DateTime.Now)[today], "Restart restores second work hours and adjustment");
                 Near(85, Map(app, projects[1], DateTime.Now)[today.AddDays(-1)], "Restart restores midnight split");
-                Check(!projects[0].RunStart.HasValue && !projects[1].RunStart.HasValue, "Restart does not count app downtime");
+                Check(projects[0].RunStart.HasValue == updated && projects[1].RunStart.HasValue == updated,
+                    "Only update restart resumes running works");
+                if (updated) Check(!Store.LoadSettings().ContainsKey("updateResume"), "Resume marker consumed once");
                 Console.WriteLine("PASS: " + checks + " fresh-process restart checks");
                 return 0;
             }

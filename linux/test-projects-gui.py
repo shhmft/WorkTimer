@@ -21,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix="worktimer-gui-") as folder:
     spec = importlib.util.spec_from_loader("wt", importlib.machinery.SourceFileLoader("wt", str(path)))
     wt = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(wt)
-    wt.save_settings({"widget": "0"})
+    wt.save_settings({"widget": "0", "updates": "0"})
     app = wt.App()
     checks = 0
 
@@ -51,6 +51,17 @@ with tempfile.TemporaryDirectory(prefix="worktimer-gui-") as folder:
                                   type=Gdk.EventType.BUTTON_PRESS)
     app.window.on_click(None, event)
     check(app.core.running_count == 2)
+    # Async release check updates the menu without pausing timers or using the network.
+    original_check = wt.updates.check_release
+    wt.updates.check_release = lambda: {"version": "1.4.0"}
+    app.confirm_update = lambda _message: False
+    app.check_updates(True)
+    deadline = dt.datetime.now() + dt.timedelta(seconds=3)
+    while app.update_busy and dt.datetime.now() < deadline:
+        Gtk.main_iteration_do(False)
+    check(not app.update_busy and app.mi_update.get_label() == "Обновить до 1.4.0")
+    check(app.core.running_count == 2)
+    wt.updates.check_release = original_check
     # Click the first row's name: both timers must continue.
     event.x, event.y = wt.W + 30, 180
     app.window.on_click(None, event)

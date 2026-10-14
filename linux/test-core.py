@@ -173,5 +173,16 @@ with open(wt.SESSIONS(), "w", encoding="utf-8-sig") as f:
     f.write("%sT08:00:00.1234567+03:00|%sT09:00:00.1234567+03:00|default\n" % (d, d))
 check("ISO Windows читается в Linux", wt.fmt(wt.Core().day_map(first)[d]), "1:15")
 
+print("8. возобновление после обновления")
+resume_settings = wt.load_settings()
+resume_settings["updateResume"] = "default," + second.id
+wt.save_settings(resume_settings)
+sys.argv.append("--updated")
+resumed = wt.Core()
+sys.argv.remove("--updated")
+check("обновление возобновляет две работы", resumed.running_count, 2)
+check("метка возобновления использована один раз", "updateResume" in wt.load_settings(), False)
+check("обычный перезапуск оставляет счёт на паузе", wt.Core().running_count, 0)
+
 print("итого: %d успешно, %d провалено" % (ok, fail))
 sys.exit(1 if fail else 0)
