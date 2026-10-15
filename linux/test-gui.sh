@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -euxo pipefail
 
 test_dir=$(mktemp -d)
 export XDG_DATA_HOME="$test_dir/data"
