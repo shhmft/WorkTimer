@@ -168,6 +168,30 @@ for name in ("", " " * 2, "Общая работа", "a" * 101, "a\nb"):
 c.toggle(first); c.toggle(second)
 c.pause_all()
 check("пауза всех работ", c.running_count, 0)
+doomed = c.add_project("Удаляемая работа")
+doomed.adjust[d] = 12
+c.segments.append((base, base + dt.timedelta(minutes=18), doomed.id))
+first_segments = [s for s in c.segments if wt.segment_parts(s)[2] == first.id]
+doomed.run_start = dt.datetime.now() - dt.timedelta(minutes=3)
+c.select(doomed)
+c.delete_project(doomed)
+check("удаление переключает выбранную работу", c.current is first, True)
+check("активный интервал перед удалением закрыт", doomed.run_start, None)
+check("удаление убирает только записи этой работы",
+      any(wt.segment_parts(s)[2] == doomed.id for s in c.segments), False)
+check("интервалы других работ не меняются",
+      [s for s in c.segments if wt.segment_parts(s)[2] == first.id], first_segments)
+c.save()
+check("удаление убирает работу из хранилища", doomed.id in wt.load_projects(), False)
+check("удаление убирает поправки из хранилища", doomed.id in wt.load_adjust(), False)
+last_only = wt.Core()
+last_only.projects = last_only.projects[:1]
+try:
+    last_only.delete_project(last_only.projects[0])
+    last_rejected = False
+except ValueError:
+    last_rejected = True
+check("последнюю работу удалить нельзя", last_rejected, True)
 # Windows writes ISO datetimes with offsets and seven fractional digits.
 with open(wt.SESSIONS(), "w", encoding="utf-8-sig") as f:
     f.write("%sT08:00:00.1234567+03:00|%sT09:00:00.1234567+03:00|default\n" % (d, d))

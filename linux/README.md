@@ -5,18 +5,18 @@
 
 ## Установка
 
-Версия исходников — **1.3.0**. Скачай `.deb` из [релизов](https://github.com/shhmft/WorkTimer/releases)
-или собери пакет из исходников по инструкции ниже. Для пакета 1.3.0 выполни:
+Версия исходников — **1.4.0**. Скачай `.deb` из [релизов](https://github.com/shhmft/WorkTimer/releases)
+или собери пакет из исходников по инструкции ниже. Для пакета 1.4.0 выполни:
 
 ```bash
-sudo apt install ./worktimer_1.3.0_all.deb
+sudo apt install ./worktimer_1.4.0_all.deb
 ```
 
 `apt` сам подтянет зависимости. Если ставить через `dpkg -i`, зависимости
 придётся доставить руками:
 
 ```bash
-sudo dpkg -i worktimer_1.3.0_all.deb
+sudo dpkg -i worktimer_1.4.0_all.deb
 sudo apt -f install
 ```
 

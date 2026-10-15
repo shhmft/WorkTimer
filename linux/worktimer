@@ -408,6 +408,19 @@ class Core:
         self.current.name = self.validate_name(name, self.current)
         self.save()
 
+    def delete_project(self, project):
+        if len(self.projects) <= 1:
+            raise ValueError("Нельзя удалить последнюю работу.")
+        if project.run_start is not None:
+            self.close_segment(project)
+        self.segments = [s for s in self.segments if segment_parts(s)[2] != project.id]
+        self.projects.remove(project)
+        project.adjust.clear()
+        if self.current is project:
+            self.current = self.projects[0]
+            self.settings["project"] = self.current.id
+        self.save()
+
     def toggle(self, project=None):
         project = project or self.current
         if project.run_start is not None:
@@ -561,7 +574,8 @@ class MainWindow(Gtk.Window):
             (TOTAL_W - 112, 14, 28, 28, "settings"),
             (TOTAL_W - 44, 14, 28, 28, "hide"),
             (W, 106, 250, 38, "add_project"),
-            (W, 622, 250, 38, "rename_project"),
+            (W, 622, 121, 38, "rename_project"),
+            (W + 129, 622, 121, 38, "delete_project"),
         ]
 
     def on_motion(self, _w, ev):
@@ -649,6 +663,8 @@ class MainWindow(Gtk.Window):
             self.app.project_dialog()
         elif name == "rename_project":
             self.app.project_dialog(rename=True)
+        elif name == "delete_project":
+            self.app.delete_project_dialog()
         self.area.queue_draw()
 
     # ---- отрисовка ----
@@ -790,7 +806,8 @@ class MainWindow(Gtk.Window):
             cr.set_source_rgb(*CARD3)
             cr.rectangle(W + 247, 156 + self.project_scroll / maxs * (454 - thumb), 3, thumb)
             cr.fill()
-        self.draw_button(cr, W, 622, 250, 38, "Переименовать")
+        self.draw_button(cr, W, 622, 121, 38, "Переименовать")
+        self.draw_button(cr, W + 129, 622, 121, 38, "Удалить")
         text(cr, "Запущено одновременно: %d" % self.core.running_count,
              W, 676, 9, GREEN if self.core.any_running else MUTED, bold=True)
         text(cr, "Каждая работа считает своё время", W, 702, 8, DIM)
@@ -899,6 +916,7 @@ class Widget(Gtk.Window):
         if visual:
             self.set_visual(visual)
         self.drag = None
+        self.project_menu = Gtk.Menu()
 
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
                         Gdk.EventMask.BUTTON_RELEASE_MASK |
@@ -907,6 +925,7 @@ class Widget(Gtk.Window):
         self.connect("button-press-event", self.on_press)
         self.connect("motion-notify-event", self.on_move)
         self.connect("button-release-event", self.on_release)
+        self.project_menu.connect("deactivate", lambda *_: self.queue_draw())
 
         s = self.core.settings
         try:
@@ -924,12 +943,27 @@ class Widget(Gtk.Window):
         if ev.button == 3:
             self.app.menu_popup(ev)
             return True
+        if ev.button == 1 and ev.x >= self.WW - 30 and ev.y < 23:
+            for child in self.project_menu.get_children():
+                self.project_menu.remove(child)
+            for project in self.core.projects:
+                item = Gtk.CheckMenuItem(label=project.name)
+                item.set_active(project is self.core.current)
+                item.connect("activate", lambda _item, target=project: self.select_project(target))
+                self.project_menu.append(item)
+            self.project_menu.show_all()
+            self.project_menu.popup_at_widget(self, Gdk.Gravity.SOUTH_EAST, Gdk.Gravity.NORTH_EAST, ev)
+            return True
         if ev.x >= self.WW - 52 and 18 <= ev.y <= 52:
-            self.core.toggle()
+            self.core.toggle(self.core.current)
             self.app.refresh()
             return True
         self.drag = (ev.x_root, ev.y_root) + tuple(self.get_position())
         return True
+
+    def select_project(self, project):
+        self.core.select(project)
+        self.app.refresh()
 
     def on_move(self, _w, ev):
         if self.drag:
@@ -968,6 +1002,11 @@ class Widget(Gtk.Window):
         cr.set_source_rgba(*acc, a)
         cr.arc(17, self.WH / 2, 4.5, 0, 2 * math.pi)
         cr.fill()
+        cr.move_to(self.WW - 24, 12)
+        cr.line_to(self.WW - 20, 16)
+        cr.line_to(self.WW - 16, 12)
+        cr.set_line_width(1.5)
+        cr.stroke()
 
         cr.push_group()
         text(cr, fmt(core.today()), 31, 11, 17, A2 if running else TEXT, bold=True)
@@ -1018,7 +1057,7 @@ class App:
         if self.core.settings.get("widget", "1") != "0":
             self.toggle_widget()
         GLib.timeout_add(1000, self.tick)
-        GLib.timeout_add(5000, self.startup_update)
+        GLib.idle_add(self.startup_update)
         GLib.timeout_add_seconds(3600, self.auto_update)
 
     # ---- трей ----
@@ -1226,8 +1265,6 @@ class App:
             self.mi_update.set_label("Обновить до " + release["version"] if release else
                                      "Проверить обновления (" + VERSION + ")")
             if not release:
-                if manual:
-                    self.error("Установлена версия %s. Более новой версии на GitHub нет." % VERSION, warning=False)
                 return
             if not manual and self.core.settings.get("updates", "1") == "0":
                 return
@@ -1335,6 +1372,23 @@ class App:
                 self.error(str(exc))
         d.destroy()
 
+    def delete_project_dialog(self):
+        if len(self.core.projects) <= 1:
+            self.error("Нельзя удалить последнюю оставшуюся работу.")
+            return
+        project = self.core.current
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+                                   message_type=Gtk.MessageType.WARNING,
+                                   buttons=Gtk.ButtonsType.YES_NO,
+                                   text="Удалить работу «%s»?\nВместе с ней будут удалены учтённые часы и ручные поправки." % project.name)
+        accepted = dialog.run() == Gtk.ResponseType.YES
+        dialog.destroy()
+        if accepted:
+            self.core.delete_project(project)
+            self.window.project_scroll = min(self.window.project_scroll,
+                max(0, len(self.core.projects) * 76 - 454))
+            self.refresh()
+
     def edit_day(self, day):
         raw = self.core.raw_map().get(day, 0.0)
         cur = self.core.day_map().get(day, 0.0)
@@ -1398,7 +1452,7 @@ class App:
         cb_a = Gtk.CheckButton(label="Запускать при входе в систему")
         cb_a.set_active(self.autostart_on())
         box.add(cb_a)
-        cb_updates = Gtk.CheckButton(label="Проверять обновления раз в сутки (версия " + VERSION + ")")
+        cb_updates = Gtk.CheckButton(label="Автоматически проверять обновления")
         cb_updates.set_active(self.core.settings.get("updates", "1") != "0")
         box.add(cb_updates)
 

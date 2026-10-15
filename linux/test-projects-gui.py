@@ -77,6 +77,11 @@ with tempfile.TemporaryDirectory(prefix="worktimer-gui-") as folder:
     check(len(app.project_menu.get_children()) == 2)
     app.toggle_widget()
     check(app.widget is not None)
+    widget_running = app.core.running_count
+    app.widget.select_project(first)
+    check(app.core.current is first and app.core.running_count == widget_running)
+    app.widget.select_project(second)
+    check(app.core.current is second and app.core.running_count == widget_running)
     first.run_start = dt.datetime.now() - dt.timedelta(minutes=20)
     second.run_start = dt.datetime.now() - dt.timedelta(minutes=55)
     app.show_window()
