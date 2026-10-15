@@ -18,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 300); do
     if ! kill -0 "$app_pid" 2>/dev/null; then
         wait "$app_pid"
         echo 'WorkTimer завершился при запуске' >&2
