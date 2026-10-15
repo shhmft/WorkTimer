@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -euxo pipefail
 
 test_dir=$(mktemp -d)
 export XDG_DATA_HOME="$test_dir/data"
@@ -7,7 +7,8 @@ export XDG_CONFIG_HOME="$test_dir/config"
 instance_file="$XDG_DATA_HOME/worktimer/.instance.lock"
 sessions_file="$XDG_DATA_HOME/worktimer/sessions.csv"
 
-worktimer --hidden &
+app_log="$test_dir/app.log"
+worktimer --hidden >"$app_log" 2>&1 &
 app_pid=$!
 cleanup() {
     if kill -0 "$app_pid" 2>/dev/null; then
@@ -17,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 300); do
     if ! kill -0 "$app_pid" 2>/dev/null; then
         wait "$app_pid"
         echo 'WorkTimer завершился при запуске' >&2
@@ -28,7 +29,12 @@ for _ in $(seq 1 50); do
     fi
     sleep 0.1
 done
-test -s "$instance_file"
+if [ ! -s "$instance_file" ]; then
+    ps -o pid,stat,cmd -p "$app_pid" || true
+    cat "$app_log" >&2
+    find "$test_dir" -maxdepth 4 -type f -ls >&2
+    exit 1
+fi
 sleep 1
 
 worktimer --toggle
@@ -42,7 +48,9 @@ import sys
 
 rows = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 assert len(rows) == 1, rows
-start, end = (dt.datetime.fromisoformat(value) for value in rows[0].split("|"))
+fields = rows[0].split("|")
+assert len(fields) == 3 and fields[2] == 'default', fields
+start, end = (dt.datetime.fromisoformat(value) for value in fields[:2])
 assert end > start, (start, end)
 PY
 

@@ -2,7 +2,7 @@
 # Сборка deb-пакета WorkTimer. Запускать из папки linux/:  ./build-deb.sh
 set -e
 
-VERSION="1.1.1"
+VERSION="1.3.0"
 PKG="worktimer"
 ARCH="all"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -16,11 +16,13 @@ trap 'rm -rf "$OUT"' EXIT
 mkdir -p "$DEST"
 mkdir -p "$ROOT/DEBIAN"
 mkdir -p "$ROOT/usr/bin"
+mkdir -p "$ROOT/usr/lib/worktimer"
 mkdir -p "$ROOT/usr/share/applications"
 mkdir -p "$ROOT/usr/share/icons/hicolor/scalable/apps"
 mkdir -p "$ROOT/usr/share/doc/$PKG"
 
 install -m 0755 "$HERE/worktimer"          "$ROOT/usr/bin/worktimer"
+install -m 0644 "$HERE/worktimer_updates.py" "$ROOT/usr/lib/worktimer/worktimer_updates.py"
 install -m 0644 "$HERE/worktimer.desktop"  "$ROOT/usr/share/applications/worktimer.desktop"
 install -m 0644 "$HERE/worktimer.svg"      "$ROOT/usr/share/icons/hicolor/scalable/apps/worktimer.svg"
 
@@ -55,7 +57,7 @@ License: MIT
  THE SOFTWARE.
 EOF
 
-printf '%s (%s) unstable; urgency=low\n\n  * Исправлено управление горячей клавишей и запуск второго экземпляра.\n\n -- shhmft <lutcenko0710@gmail.com>  %s\n' \
+printf '%s (%s) unstable; urgency=low\n\n  * Добавлены проверка релизов GitHub и скачивание обновлений с проверкой SHA-256.\n\n -- shhmft <lutcenko0710@gmail.com>  %s\n' \
   "$PKG" "$VERSION" "$(date -R)" > "$OUT/changelog"
 gzip -9 -n -c "$OUT/changelog" > "$ROOT/usr/share/doc/$PKG/changelog.Debian.gz"
 chmod 0644 "$ROOT/usr/share/doc/$PKG/changelog.Debian.gz"
@@ -72,7 +74,7 @@ Maintainer: shhmft <lutcenko0710@gmail.com>
 Installed-Size: $(du -ks "$ROOT/usr" | cut -f1)
 Description: Учёт рабочих часов в системном лотке
  Небольшая утилита: считает отработанное время, показывает итоги по дням
- и за месяц, умеет полупрозрачный виджет поверх окон и выгрузку CSV
+ и за месяц по отдельным работам, параллельные таймеры, виджет и выгрузку CSV
  за произвольный период.
  .
  Данные лежат в ~/.local/share/worktimer обычным текстом.

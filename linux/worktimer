@@ -11,10 +11,22 @@ import math
 import csv
 import datetime as dt
 import signal
+import base64
+import uuid
+import io
+import threading
+import shutil
+import subprocess
+import shlex
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append("/usr/lib/worktimer")
+import worktimer_updates as updates
 
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
+gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo  # noqa: E402
 
 APPIND = None
@@ -27,7 +39,7 @@ for ns, ver in (("AyatanaAppIndicator3", "0.1"), ("AppIndicator3", "0.1")):
         continue
 
 APP = "worktimer"
-VERSION = "1.1.1"
+VERSION = updates.VERSION
 
 # ---------------------------------------------------------------- палитра
 BG = (13 / 255, 15 / 255, 22 / 255)
@@ -45,6 +57,7 @@ AMBER = (250 / 255, 176 / 255, 60 / 255)
 ROSE = (244 / 255, 96 / 255, 128 / 255)
 
 W, H = 486, 736
+TOTAL_W = W + 270
 HERO = (20, 62, W - 40, 154)
 MONTH = (20, 296, W - 40, 348)
 ROW_H = 30
@@ -72,6 +85,7 @@ def cfg_dir():
 SESSIONS = lambda: os.path.join(data_dir(), "sessions.csv")      # noqa: E731
 ADJUST = lambda: os.path.join(data_dir(), "adjustments.csv")      # noqa: E731
 SETTINGS = lambda: os.path.join(cfg_dir(), "settings.ini")        # noqa: E731
+PROJECTS = lambda: os.path.join(data_dir(), "projects.csv")        # noqa: E731
 ERRLOG = lambda: os.path.join(data_dir(), "errors.log")           # noqa: E731
 
 
@@ -161,12 +175,13 @@ def load_segments():
                 if len(p) < 2:
                     continue
                 try:
-                    a = dt.datetime.fromisoformat(p[0])
-                    b = dt.datetime.fromisoformat(p[1])
+                    # Files from Windows may include a UTC offset; the ledger uses local wall time.
+                    a = dt.datetime.fromisoformat(p[0]).replace(tzinfo=None)
+                    b = dt.datetime.fromisoformat(p[1]).replace(tzinfo=None)
                 except ValueError:
                     continue
                 if b > a:
-                    out.append((a, b))
+                    out.append((a, b, p[2] if len(p) > 2 and p[2] else "default"))
     except Exception as e:
         log_error("чтение sessions.csv", e)
     return out
@@ -174,8 +189,12 @@ def load_segments():
 
 def save_segments(segs):
     write_atomic(SESSIONS(), "".join(
-        "%s|%s\n" % (a.replace(microsecond=0).isoformat(),
-                     b.replace(microsecond=0).isoformat()) for a, b in segs))
+        "%s|%s|%s\n" % (a.isoformat(), b.isoformat(), pid)
+        for a, b, pid in (segment_parts(s) for s in segs)))
+
+
+def segment_parts(segment):
+    return tuple(segment) if len(segment) == 3 else (*segment, "default")
 
 
 def load_adjust():
@@ -192,7 +211,8 @@ def load_adjust():
                 if len(p) < 2:
                     continue
                 try:
-                    out[dt.date.fromisoformat(p[0])] = float(p[1])
+                    pid = p[2] if len(p) > 2 and p[2] else "default"
+                    out.setdefault(pid, {})[dt.date.fromisoformat(p[0])] = float(p[1])
                 except ValueError:
                     continue
     except Exception as e:
@@ -200,10 +220,40 @@ def load_adjust():
     return out
 
 
-def save_adjust(adj):
-    body = "# поправки в минутах: дата|сколько прибавить к посчитанному\n"
-    body += "".join("%s|%s\n" % (d.isoformat(), v) for d, v in sorted(adj.items()))
+def save_adjust(projects):
+    body = "# дата|поправка в минутах|работа\n"
+    body += "".join("%s|%s|%s\n" % (d.isoformat(), v, p.id)
+                    for p in projects for d, v in sorted(p.adjust.items()))
     write_atomic(ADJUST(), body)
+
+
+class WorkProject:
+    def __init__(self, pid, name):
+        self.id, self.name = pid, name
+        self.run_start = None
+        self.session_accum = 0.0
+        self.adjust = {}
+
+
+def load_projects():
+    projects = {"default": WorkProject("default", "Общая работа")}
+    if os.path.exists(PROJECTS()):
+        with open(PROJECTS(), encoding="utf-8-sig") as f:
+            for line in f:
+                fields = line.strip().split("|")
+                if len(fields) != 2 or not fields[0]:
+                    continue
+                try:
+                    name = base64.b64decode(fields[1], validate=True).decode("utf-8")
+                    projects[fields[0]] = WorkProject(fields[0], name)
+                except (ValueError, UnicodeError) as exc:
+                    log_error("чтение названия работы", exc)
+    return projects
+
+
+def save_projects(projects):
+    write_atomic(PROJECTS(), "".join("%s|%s\n" %
+        (p.id, base64.b64encode(p.name.encode("utf-8")).decode("ascii")) for p in projects))
 
 
 def load_settings():
@@ -244,11 +294,15 @@ def rounded(cr, x, y, w, h, r):
     cr.close_path()
 
 
-def text(cr, s, x, y, size, color, bold=False, align="left", width=None):
+def text(cr, s, x, y, size, color, bold=False, align="left", width=None, ellipsis=False):
     layout = PangoCairo.create_layout(cr)
     desc = Pango.FontDescription("Sans %s%d" % ("Bold " if bold else "", size))
     layout.set_font_description(desc)
     layout.set_text(s, -1)
+    if ellipsis and width is not None:
+        layout.set_width(int(width * Pango.SCALE))
+        layout.set_ellipsize(Pango.EllipsizeMode.END)
+        layout.set_single_paragraph_mode(True)
     tw, th = layout.get_pixel_size()
     if align == "right" and width is not None:
         x = x + width - tw
@@ -273,23 +327,93 @@ def grad(cr, x, y, w, h, c1, c2, horizontal=True):
 class Core:
     def __init__(self):
         self.segments = load_segments()
-        self.adjust = load_adjust()
+        projects = load_projects()
+        adjustments = load_adjust()
+        ids = {segment_parts(s)[2] for s in self.segments} | set(adjustments)
+        for pid in ids:
+            if pid not in projects:
+                projects[pid] = WorkProject(pid, "Восстановленная работа")
+        self.projects = list(projects.values())
+        for p in self.projects:
+            p.adjust = adjustments.get(p.id, {})
         self.settings = load_settings()
-        self.run_start = None
-        self.session_accum = 0.0
+        self.current = projects.get(self.settings.get("project"), self.projects[0])
+        if "--updated" in sys.argv:
+            resume = self.settings.pop("updateResume", "").split(",")
+            for p in self.projects:
+                if p.id in resume:
+                    p.run_start = dt.datetime.now()
+            save_settings(self.settings)
         self.save_broken = False
         self.last_save = dt.datetime.now()
 
     # --- состояние ---
     @property
+    def adjust(self):
+        return self.current.adjust
+
+    @adjust.setter
+    def adjust(self, value):
+        self.current.adjust = value
+
+    @property
+    def run_start(self):
+        return self.current.run_start
+
+    @run_start.setter
+    def run_start(self, value):
+        self.current.run_start = value
+
+    @property
+    def session_accum(self):
+        return self.current.session_accum
+
+    @session_accum.setter
+    def session_accum(self, value):
+        self.current.session_accum = value
+
+    @property
     def running(self):
         return self.run_start is not None
 
-    def toggle(self):
-        if self.running:
-            self.close_segment()
+    @property
+    def running_count(self):
+        return sum(p.run_start is not None for p in self.projects)
+
+    @property
+    def any_running(self):
+        return self.running_count > 0
+
+    def select(self, project):
+        self.current = project
+        self.settings["project"] = project.id
+        save_settings(self.settings)
+
+    def validate_name(self, name, except_project=None):
+        name = name.strip()
+        if not name or len(name) > 100 or any(c in name for c in "\r\n\t"):
+            raise ValueError("Введите название от 1 до 100 символов в одну строку.")
+        if any(p is not except_project and p.name.casefold() == name.casefold() for p in self.projects):
+            raise ValueError("Работа с таким названием уже есть.")
+        return name
+
+    def add_project(self, name):
+        project = WorkProject(uuid.uuid4().hex, self.validate_name(name))
+        self.projects.append(project)
+        self.save()
+        self.select(project)
+        return project
+
+    def rename_project(self, name):
+        self.current.name = self.validate_name(name, self.current)
+        self.save()
+
+    def toggle(self, project=None):
+        project = project or self.current
+        if project.run_start is not None:
+            self.close_segment(project)
         else:
-            self.run_start = dt.datetime.now()
+            project.run_start = dt.datetime.now()
         self.save()
 
     def stop(self):
@@ -298,22 +422,33 @@ class Core:
         self.session_accum = 0.0
         self.save()
 
-    def close_segment(self):
-        if not self.run_start:
+    def close_segment(self, project=None, now=None):
+        project = project or self.current
+        if project.run_start is None:
             return
+        now = now or dt.datetime.now()
+        if now > project.run_start:
+            self.segments.append((project.run_start, now, project.id))
+            project.session_accum += (now - project.run_start).total_seconds() / 60.0
+        project.run_start = None
+
+    def pause_all(self):
         now = dt.datetime.now()
-        if (now - self.run_start).total_seconds() >= 1:
-            self.segments.append((self.run_start, now))
-            self.session_accum += (now - self.run_start).total_seconds() / 60.0
-        self.run_start = None
+        for p in self.projects:
+            self.close_segment(p, now)
+        self.save()
 
     # --- подсчёт ---
-    def raw_map(self):
+    def raw_map(self, project=None, now=None):
+        project = project or self.current
+        now = now or dt.datetime.now()
         m = {}
-        for a, b in self.segments:
-            self._span(m, a, b)
-        if self.running:
-            self._span(m, self.run_start, dt.datetime.now())
+        for segment in self.segments:
+            a, b, pid = segment_parts(segment)
+            if pid == project.id:
+                self._span(m, a, b)
+        if project.run_start is not None:
+            self._span(m, project.run_start, now)
         return m
 
     @staticmethod
@@ -324,9 +459,10 @@ class Core:
             m[a.date()] = m.get(a.date(), 0.0) + (chunk - a).total_seconds() / 60.0
             a = chunk
 
-    def day_map(self):
-        m = self.raw_map()
-        for d, delta in self.adjust.items():
+    def day_map(self, project=None, now=None):
+        project = project or self.current
+        m = self.raw_map(project, now)
+        for d, delta in project.adjust.items():
             m[d] = max(0.0, m.get(d, 0.0) + delta)
         return m
 
@@ -343,15 +479,41 @@ class Core:
     def save(self):
         try:
             segs = list(self.segments)
-            if self.running and (dt.datetime.now() - self.run_start).total_seconds() >= 1:
-                segs.append((self.run_start, dt.datetime.now()))
+            now = dt.datetime.now()
+            for p in self.projects:
+                if p.run_start is not None and now > p.run_start:
+                    segs.append((p.run_start, now, p.id))
+            save_projects(self.projects)
             save_segments(segs)
-            save_adjust(self.adjust)
+            save_adjust(self.projects)
             self.last_save = dt.datetime.now()
             self.save_broken = False
         except Exception as e:
             log_error("сохранение данных", e)
             self.save_broken = True
+
+    def export_csv(self, start, end):
+        output = io.StringIO(newline="")
+        wr = csv.writer(output, delimiter=";")
+        wr.writerow(["Работа", "Дата", "День недели", "Часы (чч:мм)", "Часы (десятичные)"])
+        m, total, worked = self.day_map(), 0.0, 0
+        day = start
+        name = self.current.name
+        if name and name[0] in "=+-@":
+            name = "'" + name
+        while day <= end:
+            v = m.get(day, 0.0)
+            if v > 0:
+                total += v
+                worked += 1
+                wr.writerow([name, day.strftime("%d.%m.%Y"), RU_DOW[day.weekday()],
+                             fmt(v), ("%.2f" % (v / 60.0)).replace(".", ",")])
+            day += dt.timedelta(days=1)
+        wr.writerow([])
+        wr.writerow(["Период", "%s — %s" % (start.strftime("%d.%m.%Y"), end.strftime("%d.%m.%Y")), "", "", ""])
+        wr.writerow(["Рабочих дней", worked, "", "", ""])
+        wr.writerow(["ИТОГО", "", "", fmt(total), ("%.2f" % (total / 60.0)).replace(".", ",")])
+        return output.getvalue()
 
 
 # ---------------------------------------------------------------- окно
@@ -360,12 +522,13 @@ class MainWindow(Gtk.Window):
         super().__init__(title="WorkTimer — учёт рабочих часов")
         self.app = app
         self.core = app.core
-        self.set_default_size(W, H)
-        self.set_size_request(W, H)
+        self.set_default_size(TOTAL_W, H)
+        self.set_size_request(TOTAL_W, H)
         self.set_resizable(False)
         self.set_skip_taskbar_hint(False)
         self.view_month = dt.date.today().replace(day=1)
         self.scroll = 0
+        self.project_scroll = 0
         self.hover = None
         self.rows = []
 
@@ -395,7 +558,10 @@ class MainWindow(Gtk.Window):
             (20, H - 52, 132, 38, "export"),
             (162, H - 52, 128, 38, "widget"),
             (300, H - 52, 166, 38, "hide"),
-            (W - 112, 14, 28, 28, "settings"),
+            (TOTAL_W - 112, 14, 28, 28, "settings"),
+            (TOTAL_W - 44, 14, 28, 28, "hide"),
+            (W, 106, 250, 38, "add_project"),
+            (W, 622, 250, 38, "rename_project"),
         ]
 
     def on_motion(self, _w, ev):
@@ -415,6 +581,14 @@ class MainWindow(Gtk.Window):
         return True
 
     def on_scroll(self, _w, ev):
+        if W <= ev.x < W + 250 and 156 <= ev.y < 610:
+            maxs = max(0, len(self.core.projects) * 76 - 454)
+            if ev.direction == Gdk.ScrollDirection.DOWN:
+                self.project_scroll = min(maxs, self.project_scroll + 76)
+            elif ev.direction == Gdk.ScrollDirection.UP:
+                self.project_scroll = max(0, self.project_scroll - 76)
+            self.area.queue_draw()
+            return True
         maxs = max(0, len(self.rows) * ROW_H - 240)
         if ev.direction == Gdk.ScrollDirection.DOWN:
             self.scroll = min(maxs, self.scroll + ROW_H * 2)
@@ -424,12 +598,28 @@ class MainWindow(Gtk.Window):
         return True
 
     def on_click(self, _w, ev):
+        if getattr(ev, "button", 1) != 1:
+            return False
+        if W <= ev.x < W + 250 and 156 <= ev.y < 610:
+            if ev.type != Gdk.EventType.BUTTON_PRESS:
+                return True
+            index = int((ev.y - 156 + self.project_scroll) // 76)
+            if 0 <= index < len(self.core.projects):
+                project = self.core.projects[index]
+                if ev.x >= W + 198:
+                    self.core.toggle(project)
+                else:
+                    self.core.select(project)
+                    self.scroll = 0
+                self.app.refresh()
+            return True
         for x, y, w, h, name in self.buttons():
             if x <= ev.x <= x + w and y <= ev.y <= y + h:
                 self.do_action(name)
                 return True
         lx, ly = MONTH[0] + 8, MONTH[1] + 96
-        if ev.type == Gdk.EventType._2BUTTON_PRESS and lx <= ev.x <= lx + MONTH[2] - 16:
+        if (ev.type == Gdk.EventType._2BUTTON_PRESS and lx <= ev.x <= lx + MONTH[2] - 16
+                and ly <= ev.y < ly + 240):
             i = int((ev.y - ly + self.scroll) // ROW_H)
             if 0 <= i < len(self.rows):
                 self.app.edit_day(self.rows[i][0])
@@ -455,6 +645,10 @@ class MainWindow(Gtk.Window):
             self.hide()
         elif name == "settings":
             self.app.settings_dialog()
+        elif name == "add_project":
+            self.app.project_dialog()
+        elif name == "rename_project":
+            self.app.project_dialog(rename=True)
         self.area.queue_draw()
 
     # ---- отрисовка ----
@@ -469,8 +663,9 @@ class MainWindow(Gtk.Window):
         rounded(cr, 20, 21, 14, 14, 4)
         cr.fill()
         text(cr, "W O R K T I M E R", 44, 20, 8, MUTED, bold=True)
-        text(cr, "⚙", W - 104, 18, 12, MUTED)
-        text(cr, "✕", W - 40, 18, 11, MUTED)
+        text(cr, "⚙", TOTAL_W - 104, 18, 12, MUTED)
+        text(cr, "✕", TOTAL_W - 40, 18, 11, MUTED)
+        self.draw_projects(cr)
 
         # карточка «сегодня»
         acc = GREEN if running else (AMBER if paused else DIM)
@@ -494,6 +689,8 @@ class MainWindow(Gtk.Window):
         cr.arc(HERO[0] + 36, HERO[1] + 31, 3.5, 0, 2 * math.pi)
         cr.fill()
         text(cr, st, HERO[0] + 45, HERO[1] + 24, 8, acc, bold=True)
+        text(cr, core.current.name, HERO[0] + 192, HERO[1] + 22, 9, A2,
+             bold=True, align="right", width=HERO[2] - 212, ellipsis=True)
 
         text(cr, fmt(core.today()), HERO[0] + 20, HERO[1] + 48, 34,
              TEXT if not running else A2, bold=True)
@@ -554,6 +751,49 @@ class MainWindow(Gtk.Window):
                          accent=bool(self.app.widget))
         self.draw_button(cr, 300, H - 52, 166, 38, "Свернуть в трей")
         return False
+
+    def draw_projects(self, cr):
+        text(cr, "Работы", W, 66, 14, TEXT, bold=True)
+        self.draw_button(cr, W, 106, 250, 38, "+ Добавить работу")
+        cr.save()
+        cr.rectangle(W, 156, 250, 454)
+        cr.clip()
+        now = dt.datetime.now()
+        for i, project in enumerate(self.core.projects):
+            y = 156 + i * 76 - self.project_scroll
+            if y + 76 <= 156 or y >= 610:
+                continue
+            selected = project is self.core.current
+            running = project.run_start is not None
+            cr.set_source_rgb(*(CARD2 if selected else CARD))
+            rounded(cr, W + 1, y + 1, 243, 68, 12)
+            cr.fill_preserve()
+            cr.set_source_rgb(*(A1 if selected else LINE))
+            cr.set_line_width(1)
+            cr.stroke()
+            state = GREEN if running else (AMBER if project.session_accum > 0 else DIM)
+            cr.set_source_rgb(*state)
+            cr.arc(W + 15, y + 19, 3, 0, 2 * math.pi)
+            cr.fill()
+            text(cr, project.name, W + 25, y + 10, 9, TEXT, bold=True, width=168, ellipsis=True)
+            day_map = self.core.day_map(project, now)
+            today = day_map.get(now.date(), 0.0)
+            month = sum(v for d, v in day_map.items()
+                        if (d.year, d.month) == (self.view_month.year, self.view_month.month))
+            text(cr, "Сегодня " + fmt(today), W + 12, y + 32, 8, GREEN if running else MUTED)
+            text(cr, "Месяц " + fmt(month), W + 12, y + 50, 8, DIM)
+            self.draw_button(cr, W + 202, y + 16, 32, 34, "Ⅱ" if running else "▶", small=True, accent=True)
+        cr.restore()
+        maxs = max(0, len(self.core.projects) * 76 - 454)
+        if maxs:
+            thumb = max(24, 454 * 454 / (len(self.core.projects) * 76))
+            cr.set_source_rgb(*CARD3)
+            cr.rectangle(W + 247, 156 + self.project_scroll / maxs * (454 - thumb), 3, thumb)
+            cr.fill()
+        self.draw_button(cr, W, 622, 250, 38, "Переименовать")
+        text(cr, "Запущено одновременно: %d" % self.core.running_count,
+             W, 676, 9, GREEN if self.core.any_running else MUTED, bold=True)
+        text(cr, "Каждая работа считает своё время", W, 702, 8, DIM)
 
     def draw_button(self, cr, x, y, w, h, label, primary=False, small=False,
                     accent=False, running=False):
@@ -731,8 +971,7 @@ class Widget(Gtk.Window):
 
         cr.push_group()
         text(cr, fmt(core.today()), 31, 11, 17, A2 if running else TEXT, bold=True)
-        sub = ("сессия " + fmt(core.session())) if (running or paused) else "остановлен"
-        text(cr, sub, 33, 43, 7, DIM)
+        text(cr, core.current.name, 33, 43, 7, MUTED, width=123, ellipsis=True)
         cr.pop_group_to_source()
         cr.paint_with_alpha(a)
 
@@ -768,6 +1007,9 @@ class Widget(Gtk.Window):
 class App:
     def __init__(self):
         self.core = Core()
+        self.update_busy = False
+        self.pending_update = None
+        self.closing = False
         self.window = MainWindow(self)
         self.widget = None
         self.ind = None
@@ -776,6 +1018,8 @@ class App:
         if self.core.settings.get("widget", "1") != "0":
             self.toggle_widget()
         GLib.timeout_add(1000, self.tick)
+        GLib.timeout_add(5000, self.startup_update)
+        GLib.timeout_add_seconds(3600, self.auto_update)
 
     # ---- трей ----
     def build_tray(self):
@@ -783,9 +1027,17 @@ class App:
         self.mi_toggle = Gtk.MenuItem(label="Старт")
         self.mi_toggle.connect("activate", lambda *_: (self.core.toggle(), self.refresh()))
         self.menu.append(self.mi_toggle)
-        mi_stop = Gtk.MenuItem(label="Стоп — завершить сессию")
-        mi_stop.connect("activate", lambda *_: (self.core.stop(), self.refresh()))
-        self.menu.append(mi_stop)
+        self.mi_stop = Gtk.MenuItem(label="Стоп — завершить сессию")
+        self.mi_stop.connect("activate", lambda *_: (self.core.stop(), self.refresh()))
+        self.menu.append(self.mi_stop)
+        mi_projects = Gtk.MenuItem(label="Работы: старт / пауза")
+        self.project_menu = Gtk.Menu()
+        mi_projects.set_submenu(self.project_menu)
+        self.project_menu.connect("show", self.refresh_project_menu)
+        self.menu.append(mi_projects)
+        self.mi_pause_all = Gtk.MenuItem(label="Пауза всех работ")
+        self.mi_pause_all.connect("activate", lambda *_: (self.core.pause_all(), self.refresh()))
+        self.menu.append(self.mi_pause_all)
         self.menu.append(Gtk.SeparatorMenuItem())
         mi_show = Gtk.MenuItem(label="Показать окно")
         mi_show.connect("activate", lambda *_: self.show_window())
@@ -804,6 +1056,14 @@ class App:
         mi_auto = Gtk.MenuItem(label="Запускать при входе")
         mi_auto.connect("activate", lambda *_: self.toggle_autostart())
         self.menu.append(mi_auto)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        self.mi_update = Gtk.MenuItem(label="Проверить обновления (" + VERSION + ")")
+        self.mi_update.connect("activate", lambda *_: self.offer_update() if self.pending_update else self.check_updates(True))
+        self.menu.append(self.mi_update)
+        self.mi_auto_update = Gtk.CheckMenuItem(label="Проверять обновления автоматически")
+        self.mi_auto_update.set_active(self.core.settings.get("updates", "1") != "0")
+        self.mi_auto_update.connect("toggled", self.toggle_auto_updates)
+        self.menu.append(self.mi_auto_update)
         self.menu.append(Gtk.SeparatorMenuItem())
         mi_quit = Gtk.MenuItem(label="Выход")
         mi_quit.connect("activate", lambda *_: self.quit())
@@ -827,6 +1087,16 @@ class App:
     def menu_popup(self, ev):
         self.menu.popup_at_pointer(ev)
 
+    def refresh_project_menu(self, *_):
+        for child in self.project_menu.get_children():
+            child.destroy()
+        for project in self.core.projects:
+            label = ("Пауза: " if project.run_start is not None else "Старт: ") + project.name
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _item, p=project: (self.core.toggle(p), self.refresh()))
+            self.project_menu.append(item)
+            item.show()
+
     def show_window(self):
         self.window.show_all()
         self.window.present()
@@ -834,7 +1104,7 @@ class App:
     # ---- обновление ----
     def tick(self):
         core = self.core
-        if core.running and (dt.datetime.now() - core.last_save).total_seconds() >= 15:
+        if core.any_running and (dt.datetime.now() - core.last_save).total_seconds() >= 15:
             core.save()
         self.refresh()
         return True
@@ -842,12 +1112,15 @@ class App:
     def refresh(self):
         core = self.core
         running, paused = core.running, (not core.running and core.session_accum > 0)
-        state = "Идёт учёт" if running else ("Пауза" if paused else "Остановлен")
-        label = "%s • сегодня %s" % (state, fmt(core.today()))
-        self.mi_toggle.set_label("Пауза" if running else
-                                 ("Продолжить" if paused else "Старт"))
-        icon = ("media-playback-start" if running else
-                ("media-playback-pause" if paused else "appointment-soon"))
+        any_paused = any(p.session_accum > 0 for p in core.projects)
+        state = ("Идёт учёт: %d" % core.running_count) if core.any_running else ("Пауза" if any_paused else "Остановлен")
+        label = "%s • %s %s" % (state, core.current.name, fmt(core.today()))
+        self.mi_toggle.set_label(("Пауза: " if running else
+                                 ("Продолжить: " if paused else "Старт: ")) + core.current.name)
+        self.mi_stop.set_label("Стоп: " + core.current.name)
+        self.mi_pause_all.set_sensitive(core.any_running)
+        icon = ("media-playback-start" if core.any_running else
+                ("media-playback-pause" if any_paused else "appointment-soon"))
         try:
             if APPIND and hasattr(self.ind, "set_icon_full"):
                 self.ind.set_icon_full(icon, label)
@@ -896,6 +1169,172 @@ class App:
                         "X-GNOME-Autostart-enabled=true\nTerminal=false\n")
 
     # ---- диалоги ----
+    def toggle_auto_updates(self, item):
+        self.core.settings["updates"] = "1" if item.get_active() else "0"
+        save_settings(self.core.settings)
+
+    def auto_update(self):
+        if self.closing or self.core.settings.get("updates", "1") == "0" or self.update_busy:
+            return True
+        try:
+            last = dt.datetime.fromisoformat(self.core.settings.get("updateCheck", ""))
+            age = dt.datetime.utcnow() - last
+            due = age.total_seconds() < 0 or age.total_seconds() >= 86400
+        except ValueError:
+            due = True
+        if due:
+            self.check_updates(False)
+        return True
+
+    def startup_update(self):
+        self.auto_update()
+        return False
+
+    def update_worker(self, work, done):
+        self.update_busy = True
+        self.mi_update.set_sensitive(False)
+
+        def finish(result, error):
+            if self.closing:
+                return False
+            self.update_busy = False
+            self.mi_update.set_sensitive(True)
+            done(result, error)
+            return False
+
+        def worker():
+            try:
+                result = work()
+                GLib.idle_add(finish, result, None)
+            except Exception as exc:
+                log_error("обновление", exc)
+                GLib.idle_add(finish, None, exc)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def check_updates(self, manual=False):
+        if self.update_busy:
+            return
+        self.core.settings["updateCheck"] = dt.datetime.utcnow().isoformat()
+        save_settings(self.core.settings)
+
+        def done(release, error):
+            if error:
+                if manual:
+                    self.error("Не удалось проверить обновления. Проверьте интернет и попробуйте ещё раз.\n" + str(error))
+                return
+            self.pending_update = release
+            self.mi_update.set_label("Обновить до " + release["version"] if release else
+                                     "Проверить обновления (" + VERSION + ")")
+            if not release:
+                if manual:
+                    self.error("Установлена версия %s. Более новой версии на GitHub нет." % VERSION, warning=False)
+                return
+            if not manual and self.core.settings.get("updates", "1") == "0":
+                return
+            if manual or self.core.settings.get("updateNotified") != release["version"]:
+                self.core.settings["updateNotified"] = release["version"]
+                save_settings(self.core.settings)
+                self.offer_update()
+        self.update_worker(updates.check_release, done)
+
+    def confirm_update(self, message):
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+                                   message_type=Gtk.MessageType.QUESTION,
+                                   buttons=Gtk.ButtonsType.YES_NO, text=message)
+        accepted = dialog.run() == Gtk.ResponseType.YES
+        dialog.destroy()
+        return accepted
+
+    def offer_update(self):
+        if self.update_busy or not self.pending_update:
+            return
+        release = self.pending_update
+        if not self.confirm_update("Доступна версия %s. Скачать обновление?\nЧасы продолжат считаться во время загрузки." % release["version"]):
+            return
+        self.mi_update.set_label("Скачивается обновление…")
+
+        def done(path, error):
+            self.mi_update.set_label("Обновить до " + release["version"])
+            if error:
+                self.error("Не удалось скачать обновление.\n" + str(error))
+                return
+            self.install_update(path, release)
+        self.update_worker(lambda: updates.download(release, os.path.join(data_dir(), "updates")), done)
+
+    def install_update(self, path, release):
+        try:
+            package = subprocess.check_output(["dpkg-deb", "-f", path, "Package"], text=True).strip()
+            version = subprocess.check_output(["dpkg-deb", "-f", path, "Version"], text=True).strip()
+            if package != "worktimer" or version != release["version"]:
+                raise ValueError("Скачанный пакет не соответствует релизу WorkTimer.")
+        except Exception as exc:
+            self.error(str(exc))
+            return
+        if not shutil.which("pkexec") or not shutil.which("apt-get"):
+            self.error("Обновление скачано. Установите пакет командой:\n\nsudo apt install " + shlex.quote(path), warning=False)
+            return
+        if not self.confirm_update("Обновление скачано и проверено. Установить версию %s?\nСистема запросит права администратора. После установки таймер перезапустится." % release["version"]):
+            return
+        self.mi_update.set_label("Устанавливается обновление…")
+
+        def install():
+            result = subprocess.run([shutil.which("pkexec"), shutil.which("apt-get"), "install", "-y", path],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+            if result.returncode:
+                raise RuntimeError("Установка отменена или завершилась с ошибкой.\n" + result.stderr[-1500:])
+            return True
+
+        def done(_result, error):
+            self.mi_update.set_label("Обновить до " + release["version"])
+            if error:
+                self.error(str(error))
+                return
+            resume = [p.id for p in self.core.projects if p.run_start is not None]
+            self.core.settings["updateResume"] = ",".join(resume)
+            save_settings(self.core.settings)
+            self.core.pause_all()
+            if self.core.save_broken:
+                for p in self.core.projects:
+                    if p.id in resume:
+                        p.run_start = dt.datetime.now()
+                self.error("Не удалось сохранить часы. Перезапуск отложен; обновление уже установлено.")
+                return
+            self.closing = True
+            self.window.destroy()
+            if self.widget:
+                self.widget.destroy()
+            os.execv(sys.executable, [sys.executable, "/usr/bin/worktimer", "--updated"])
+        self.update_worker(install, done)
+
+    def project_dialog(self, rename=False):
+        d = Gtk.Dialog(title="Название работы" if rename else "Новая работа",
+                       transient_for=self.window, modal=True)
+        d.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить", Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(14)
+        box.add(Gtk.Label(label="Название проекта, клиента или задачи"))
+        entry = Gtk.Entry(text=self.core.current.name if rename else "")
+        entry.set_max_length(100)
+        entry.set_size_request(340, -1)
+        entry.set_activates_default(True)
+        d.set_default_response(Gtk.ResponseType.OK)
+        box.add(entry)
+        d.show_all()
+        while d.run() == Gtk.ResponseType.OK:
+            try:
+                if rename:
+                    self.core.rename_project(entry.get_text())
+                else:
+                    self.core.add_project(entry.get_text())
+                    self.window.project_scroll = max(0, len(self.core.projects) * 76 - 454)
+                    self.window.scroll = 0
+                self.refresh()
+                break
+            except ValueError as exc:
+                self.error(str(exc))
+        d.destroy()
+
     def edit_day(self, day):
         raw = self.core.raw_map().get(day, 0.0)
         cur = self.core.day_map().get(day, 0.0)
@@ -930,9 +1369,9 @@ class App:
             self.refresh()
         d.destroy()
 
-    def error(self, msg):
+    def error(self, msg, warning=True):
         m = Gtk.MessageDialog(transient_for=self.window, modal=True,
-                              message_type=Gtk.MessageType.WARNING,
+                              message_type=Gtk.MessageType.WARNING if warning else Gtk.MessageType.INFO,
                               buttons=Gtk.ButtonsType.OK, text=msg)
         m.run()
         m.destroy()
@@ -959,6 +1398,9 @@ class App:
         cb_a = Gtk.CheckButton(label="Запускать при входе в систему")
         cb_a.set_active(self.autostart_on())
         box.add(cb_a)
+        cb_updates = Gtk.CheckButton(label="Проверять обновления раз в сутки (версия " + VERSION + ")")
+        cb_updates.set_active(self.core.settings.get("updates", "1") != "0")
+        box.add(cb_updates)
 
         box.add(Gtk.Label(
             label="Глобальная горячая клавиша задаётся в параметрах системы:\n"
@@ -970,6 +1412,7 @@ class App:
             self.toggle_widget()
         if cb_a.get_active() != self.autostart_on():
             self.toggle_autostart()
+        self.mi_auto_update.set_active(cb_updates.get_active())
         self.core.settings["alpha"] = "%.3f" % (adj.get_value() / 100.0)
         save_settings(self.core.settings)
         if self.widget:
@@ -1009,38 +1452,20 @@ class App:
         ch = Gtk.FileChooserDialog(title="Сохранить CSV", transient_for=self.window,
                                    action=Gtk.FileChooserAction.SAVE)
         ch.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Сохранить", Gtk.ResponseType.OK)
-        ch.set_current_name("worktime_%s_%s.csv" % (a.isoformat(), b.isoformat()))
+        safe_name = "".join("_" if c in '/\\<>:"|?*' else c for c in self.core.current.name)
+        ch.set_current_name("%s_worktime_%s_%s.csv" % (safe_name, a.isoformat(), b.isoformat()))
         ch.set_do_overwrite_confirmation(True)
         if ch.run() == Gtk.ResponseType.OK:
             path = ch.get_filename()
             ch.destroy()
-            m = self.core.day_map()
-            total, worked = 0.0, 0
             with open(path, "w", encoding="utf-8", newline="") as f:
-                wr = csv.writer(f, delimiter=";")
-                wr.writerow(["Дата", "День недели", "Часы (чч:мм)", "Часы (десятичные)"])
-                day = a
-                while day <= b:
-                    v = m.get(day, 0.0)
-                    if v > 0:
-                        total += v
-                        worked += 1
-                        wr.writerow([day.strftime("%d.%m.%Y"), RU_DOW[day.weekday()],
-                                     fmt(v), ("%.2f" % (v / 60.0)).replace(".", ",")])
-                    day += dt.timedelta(days=1)
-                wr.writerow([])
-                wr.writerow(["Период", "%s — %s" % (a.strftime("%d.%m.%Y"),
-                                                    b.strftime("%d.%m.%Y")), "", ""])
-                wr.writerow(["Рабочих дней", worked, "", ""])
-                wr.writerow(["ИТОГО", "", fmt(total),
-                             ("%.2f" % (total / 60.0)).replace(".", ",")])
+                f.write(self.core.export_csv(a, b))
         else:
             ch.destroy()
 
     def quit(self):
-        if self.core.running:
-            self.core.close_segment()
-        self.core.save()
+        self.closing = True
+        self.core.pause_all()
         Gtk.main_quit()
 
 

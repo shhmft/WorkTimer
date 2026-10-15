@@ -11,13 +11,17 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
+
 namespace WorkTimer
 {
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            if (args.Length == 5 && args[0] == "--apply-update") { Updates.Apply(args); return; }
             bool created;
             using (Mutex mtx = new Mutex(true, "WorkTimerSingleInstance_9F3A", out created))
             {
@@ -429,16 +433,152 @@ namespace WorkTimer
     {
         public DateTime Start;
         public DateTime End;
-        public Segment(DateTime s, DateTime e) { Start = s; End = e; }
+        public string ProjectId;
+        public Segment(DateTime s, DateTime e) : this(s, e, "default") { }
+        public Segment(DateTime s, DateTime e, string projectId)
+        { Start = s; End = e; ProjectId = projectId; }
+    }
+
+    class WorkProject
+    {
+        public string Id, Name;
+        public DateTime? RunStart;
+        public double SessionMinutes;
+        public Dictionary<DateTime, double> Adjustments = new Dictionary<DateTime, double>();
+        public WorkProject(string id, string name) { Id = id; Name = name; }
+    }
+
+    class ProjectRow
+    {
+        public WorkProject Project;
+        public double Today, Month;
+    }
+
+    class ProjectList : Control
+    {
+        public List<ProjectRow> Rows = new List<ProjectRow>();
+        public WorkProject Current;
+        public Action<WorkProject> Selected, Toggled;
+        int scroll;
+        const int RowHeight = 76;
+        int MaxScroll { get { return Math.Max(0, Rows.Count * RowHeight - Height); } }
+
+        public ProjectList()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
+            BackColor = Skin.Bg;
+            Cursor = Cursors.Hand;
+            AccessibleName = "Работы и независимые таймеры";
+        }
+
+        public void RefreshRows(List<ProjectRow> rows, WorkProject current)
+        {
+            bool changed = Current != current;
+            Rows = rows; Current = current;
+            if (changed)
+            {
+                int index = Rows.FindIndex(delegate(ProjectRow r) { return r.Project == current; });
+                if (index >= 0 && index * RowHeight < scroll) scroll = index * RowHeight;
+                if (index >= 0 && (index + 1) * RowHeight > scroll + Height)
+                    scroll = (index + 1) * RowHeight - Height;
+            }
+            scroll = Math.Min(scroll, MaxScroll);
+            Invalidate();
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            int index = Rows.FindIndex(delegate(ProjectRow r) { return r.Project == Current; });
+            if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
+            {
+                index += e.KeyCode == Keys.Up ? -1 : 1;
+                if (index >= 0 && index < Rows.Count && Selected != null) Selected(Rows[index].Project);
+                e.Handled = true;
+            }
+            if (e.KeyCode == Keys.Space && Current != null && Toggled != null)
+            { Toggled(Current); e.Handled = true; }
+            base.OnKeyDown(e);
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            return key == Keys.Up || key == Keys.Down || base.IsInputKey(keyData);
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        { Focus(); base.OnMouseEnter(e); }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            scroll = Math.Max(0, Math.Min(MaxScroll, scroll - e.Delta / 120 * RowHeight));
+            Invalidate(); base.OnMouseWheel(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            int index = (e.Y + scroll) / RowHeight;
+            if (index < 0 || index >= Rows.Count) return;
+            WorkProject p = Rows[index].Project;
+            if (e.X >= Width - 52) { if (Toggled != null) Toggled(p); }
+            else if (Selected != null) Selected(p);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(BackColor);
+            for (int i = scroll / RowHeight; i < Rows.Count; i++)
+            {
+                int y = i * RowHeight - scroll;
+                if (y >= Height) break;
+                ProjectRow row = Rows[i]; WorkProject p = row.Project;
+                bool selected = p == Current, running = p.RunStart.HasValue;
+                Rectangle card = new Rectangle(1, y + 1, Width - 7, RowHeight - 8);
+                using (GraphicsPath path = Skin.Round(card, 12))
+                {
+                    using (SolidBrush b = new SolidBrush(selected ? Skin.Card2 : Skin.Card)) g.FillPath(b, path);
+                    using (Pen pen = new Pen(selected ? Skin.A1 : Skin.Line)) g.DrawPath(pen, path);
+                }
+                Color state = running ? Skin.Green : (p.SessionMinutes > 0 ? Skin.Amber : Skin.Dim);
+                using (SolidBrush b = new SolidBrush(state)) g.FillEllipse(b, 12, y + 16, 6, 6);
+                TextRenderer.DrawText(g, p.Name, Skin.F(9.5f, FontStyle.Bold),
+                    new Rectangle(25, y + 10, Width - 82, 22), Skin.Text,
+                    TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, "Сегодня " + TrayApp.Fmt(row.Today), Skin.F(8.5f, FontStyle.Regular),
+                    new Rectangle(12, y + 32, Width - 66, 18), running ? Skin.Green : Skin.Muted,
+                    TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(g, "Месяц " + TrayApp.Fmt(row.Month), Skin.F(8f, FontStyle.Regular),
+                    new Rectangle(12, y + 50, Width - 66, 16), Skin.Dim, TextFormatFlags.NoPadding);
+                Rectangle button = new Rectangle(Width - 48, y + 16, 32, 34);
+                using (GraphicsPath path = Skin.Round(button, 9))
+                using (SolidBrush b = new SolidBrush(running ? Color.FromArgb(55, 49, 33) : Skin.Card3))
+                    g.FillPath(b, path);
+                TextRenderer.DrawText(g, running ? "Ⅱ" : "▶", Skin.F(12f, FontStyle.Bold), button,
+                    running ? Skin.Amber : Skin.A2,
+                    TextFormatFlags.NoPadding | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+            if (MaxScroll > 0)
+            {
+                float h = Math.Max(24, (float)Height * Height / (Rows.Count * RowHeight));
+                using (SolidBrush b = new SolidBrush(Skin.Card3))
+                    g.FillRectangle(b, Width - 3, (float)scroll / MaxScroll * (Height - h), 3, h);
+            }
+        }
     }
 
     static class Store
     {
+        internal static string DataDirectory = null;
         public static string Dir
         {
             get
             {
-                string d = Path.Combine(
+                string d = DataDirectory ?? Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WorkTimer");
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
                 return d;
@@ -448,6 +588,63 @@ namespace WorkTimer
         public static string OverridesFile { get { return Path.Combine(Dir, "overrides.csv"); } }
         public static string AdjustFile { get { return Path.Combine(Dir, "adjustments.csv"); } }
         public static string LogFile { get { return Path.Combine(Dir, "errors.log"); } }
+        public static string ProjectsFile { get { return Path.Combine(Dir, "projects.csv"); } }
+
+        public static List<WorkProject> LoadProjects()
+        {
+            List<WorkProject> list = new List<WorkProject>();
+            list.Add(new WorkProject("default", "Общая работа"));
+            if (!File.Exists(ProjectsFile)) return list;
+            foreach (string line in File.ReadAllLines(ProjectsFile))
+            {
+                string[] p = line.Split('|');
+                if (p.Length != 2 || p[0].Length == 0) continue;
+                try
+                {
+                    string name = Encoding.UTF8.GetString(Convert.FromBase64String(p[1]));
+                    WorkProject found = list.Find(delegate(WorkProject x) { return x.Id == p[0]; });
+                    if (found != null) found.Name = name;
+                    else list.Add(new WorkProject(p[0], name));
+                }
+                catch (FormatException ex) { Log("чтение названия работы", ex); }
+            }
+            return list;
+        }
+
+        public static void SaveProjects(List<WorkProject> projects)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (WorkProject p in projects)
+                sb.AppendLine(p.Id + "|" + Convert.ToBase64String(Encoding.UTF8.GetBytes(p.Name)));
+            WriteAtomic(ProjectsFile, sb.ToString());
+        }
+
+        static string ProjectField(string[] fields)
+        { return fields.Length >= 3 && fields[2].Length > 0 ? fields[2] : "default"; }
+
+        public static void LoadProjectAdjustments(List<WorkProject> projects)
+        {
+            if (!File.Exists(AdjustFile)) return;
+            foreach (string line in File.ReadAllLines(AdjustFile))
+            {
+                string[] fields = line.Split('|');
+                if (fields.Length < 2 || line.StartsWith("#")) continue;
+                string id = ProjectField(fields);
+                if (!projects.Exists(delegate(WorkProject p) { return p.Id == id; }))
+                    projects.Add(new WorkProject(id, "Восстановленная работа"));
+            }
+            foreach (WorkProject p in projects) p.Adjustments = LoadAdjust(p.Id);
+        }
+
+        public static void SaveAdjust(List<WorkProject> projects)
+        {
+            StringBuilder sb = new StringBuilder("# дата|поправка в минутах|работа\r\n");
+            foreach (WorkProject p in projects)
+                foreach (KeyValuePair<DateTime, double> kv in p.Adjustments)
+                    sb.AppendLine(kv.Key.ToString("yyyy-MM-dd") + "|" +
+                        kv.Value.ToString(CultureInfo.InvariantCulture) + "|" + p.Id);
+            WriteAtomic(AdjustFile, sb.ToString());
+        }
 
         public static string LastError;
 
@@ -507,7 +704,7 @@ namespace WorkTimer
                 if (DateTime.TryParse(p[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out a) &&
                     DateTime.TryParse(p[1], CultureInfo.InvariantCulture, DateTimeStyles.None, out b) &&
                     b > a)
-                    list.Add(new Segment(a, b));
+                    list.Add(new Segment(a, b, ProjectField(p)));
             }
             return list;
         }
@@ -516,7 +713,7 @@ namespace WorkTimer
         {
             StringBuilder sb = new StringBuilder();
             foreach (Segment g in list)
-                sb.AppendLine(g.Start.ToString("s") + "|" + g.End.ToString("s"));
+                sb.AppendLine(g.Start.ToString("o") + "|" + g.End.ToString("o") + "|" + g.ProjectId);
             WriteAtomic(SessionsFile, sb.ToString());
         }
 
@@ -541,7 +738,7 @@ namespace WorkTimer
 
         // Возвращает поправки в минутах: сколько ПРИБАВИТЬ к посчитанному за день.
         // Старый формат хранил итог целиком и потому затирал отсчитанное время.
-        public static Dictionary<DateTime, double> LoadAdjust()
+        public static Dictionary<DateTime, double> LoadAdjust(string projectId)
         {
             Dictionary<DateTime, double> map = new Dictionary<DateTime, double>();
             if (!File.Exists(AdjustFile)) return map;
@@ -552,7 +749,7 @@ namespace WorkTimer
                     string t = line.Trim();
                     if (t.Length == 0 || t[0] == '#') continue;
                     string[] p = t.Split('|');
-                    if (p.Length < 2) continue;
+                    if (p.Length < 2 || ProjectField(p) != projectId) continue;
                     DateTime d; double m;
                     if (DateTime.TryParse(p[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out d) &&
                         double.TryParse(p[1], NumberStyles.Any, CultureInfo.InvariantCulture, out m))
@@ -561,16 +758,6 @@ namespace WorkTimer
             }
             catch (Exception ex) { Log("чтение adjustments.csv", ex); }
             return map;
-        }
-
-        public static void SaveAdjust(Dictionary<DateTime, double> map)
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("# поправки в минутах: дата|сколько прибавить к посчитанному");
-            foreach (KeyValuePair<DateTime, double> kv in map)
-                sb.AppendLine(kv.Key.ToString("yyyy-MM-dd") + "|" +
-                    kv.Value.ToString(CultureInfo.InvariantCulture));
-            WriteAtomic(AdjustFile, sb.ToString());
         }
 
         public static Dictionary<DateTime, double> LoadOverrides()
@@ -605,9 +792,13 @@ namespace WorkTimer
     class TrayApp : Form
     {
         List<Segment> segments = new List<Segment>();
-        Dictionary<DateTime, double> overrides = new Dictionary<DateTime, double>();
-        DateTime? runStart = null;
-        double sessionAccumMin = 0;
+        List<WorkProject> projects = new List<WorkProject>();
+        WorkProject currentProject;
+        Dictionary<DateTime, double> overrides { get { return currentProject.Adjustments; } }
+        DateTime? runStart { get { return currentProject.RunStart; } set { currentProject.RunStart = value; } }
+        double sessionAccumMin { get { return currentProject.SessionMinutes; } set { currentProject.SessionMinutes = value; } }
+        bool AnyRunning { get { return projects.Exists(delegate(WorkProject p) { return p.RunStart.HasValue; }); } }
+        int RunningCount { get { return projects.FindAll(delegate(WorkProject p) { return p.RunStart.HasValue; }).Count; } }
         DateTime viewMonth = new DateTime(DateTime.Now.Year, DateTime.Now.Month, 1);
         DateTime lastSave = DateTime.Now;
         int lastSecond = -1;
@@ -629,13 +820,19 @@ namespace WorkTimer
 
         GButton btStartPause, btStop, btPrev, btNext, btExport, btMin, btClose, btWidget;
         DayList dayList;
+        ProjectList projectList;
         HudWidget hud;
         Dictionary<string, string> settings = new Dictionary<string, string>();
         System.Windows.Forms.Timer timer;
+        ToolStripMenuItem miUpdate, miAutoUpdate;
+        bool updateBusy;
+        UpdateRelease pendingUpdate;
+        DateTime updateCheckAfter = DateTime.UtcNow.AddSeconds(5);
 
         string monthTitle = "", monthTotal = "0:00", statsLine = "";
 
         const int W = 486, H = 736;
+        const int TotalW = W + 270;
         static readonly Rectangle HeroRect = new Rectangle(20, 62, W - 40, 154);
         static readonly Rectangle MonthRect = new Rectangle(20, 296, W - 40, 348);
 
@@ -661,6 +858,15 @@ namespace WorkTimer
         internal bool HotkeyOn
         {
             get { string v; return settings.TryGetValue("hotkey", out v) && v == "1"; }
+        }
+
+        internal bool AutoUpdates
+        { get { string value; return !settings.TryGetValue("updates", out value) || value != "0"; } }
+        internal void SetAutoUpdates(bool value)
+        {
+            settings["updates"] = value ? "1" : "0";
+            Store.SaveSettings(settings);
+            if (miAutoUpdate != null) miAutoUpdate.Checked = value;
         }
 
         internal void SetHotkey(bool on)
@@ -716,7 +922,7 @@ namespace WorkTimer
         {
             try
             {
-                if (Running) CloseSegment();
+                CloseAllSegments();
                 SaveNow();
             }
             catch { }
@@ -735,9 +941,29 @@ namespace WorkTimer
         public TrayApp()
         {
             segments = Store.LoadSegments();
-            overrides = Store.LoadAdjust();
+            projects = Store.LoadProjects();
+            foreach (Segment s in segments)
+                if (!projects.Exists(delegate(WorkProject p) { return p.Id == s.ProjectId; }))
+                    projects.Add(new WorkProject(s.ProjectId, "Восстановленная работа"));
+            Store.LoadProjectAdjustments(projects);
+            currentProject = projects[0];
             MigrateLegacyOverrides();
             settings = Store.LoadSettings();
+            string selected;
+            if (settings.TryGetValue("project", out selected))
+            {
+                WorkProject saved = projects.Find(delegate(WorkProject p) { return p.Id == selected; });
+                if (saved != null) currentProject = saved;
+            }
+            string[] startupArgs = Environment.GetCommandLineArgs();
+            if (Array.IndexOf(startupArgs, "--updated") >= 0)
+            {
+                string resume;
+                if (settings.TryGetValue("updateResume", out resume))
+                    foreach (WorkProject p in projects)
+                        if (Array.IndexOf(resume.Split(','), p.Id) >= 0) p.RunStart = DateTime.Now;
+                settings.Remove("updateResume"); Store.SaveSettings(settings);
+            }
             BuildIcons();
             BuildTray();
             BuildWindow();
@@ -764,6 +990,9 @@ namespace WorkTimer
 
             UpdateAll();
             TrimMemory();
+            if (Array.IndexOf(startupArgs, "--update-failed") >= 0)
+                MessageBox.Show("Не удалось установить обновление. Запущена прежняя версия; часы сохранены. Подробности в errors.log.",
+                    "WorkTimer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         protected override CreateParams CreateParams
@@ -852,6 +1081,25 @@ namespace WorkTimer
 
             menu.Items.Add(miStartPause);
             menu.Items.Add(miStop);
+            ToolStripMenuItem projectMenu = new ToolStripMenuItem("Работы: старт / пауза");
+            projectMenu.DropDownOpening += delegate
+            {
+                while (projectMenu.DropDownItems.Count > 0) projectMenu.DropDownItems[0].Dispose();
+                foreach (WorkProject p in projects)
+                {
+                    WorkProject target = p;
+                    ToolStripMenuItem item = new ToolStripMenuItem(
+                        (p.RunStart.HasValue ? "Пауза: " : "Старт: ") + p.Name,
+                        null, delegate { ToggleProject(target); });
+                    item.Checked = p.RunStart.HasValue;
+                    projectMenu.DropDownItems.Add(item);
+                }
+            };
+            menu.Items.Add(projectMenu);
+            ToolStripMenuItem pauseAll = new ToolStripMenuItem("Пауза всех работ", null, delegate
+            { CloseAllSegments(); DropCache(); lastRowsKey = ""; SaveNow(); UpdateAll(); });
+            menu.Items.Add(pauseAll);
+            menu.Opening += delegate { pauseAll.Enabled = AnyRunning; };
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(miShow);
             menu.Items.Add(new ToolStripMenuItem("Настройки", null, delegate { OpenSettings(); }));
@@ -861,12 +1109,20 @@ namespace WorkTimer
             menu.Items.Add(miWidget);
             menu.Items.Add(miAutostart);
             menu.Items.Add(new ToolStripSeparator());
+            miUpdate = new ToolStripMenuItem("Проверить обновления (" + Updates.Current + ")", null,
+                delegate { if (pendingUpdate != null) OfferUpdate(); else CheckUpdates(true); });
+            miAutoUpdate = new ToolStripMenuItem("Проверять обновления автоматически", null,
+                delegate { SetAutoUpdates(!AutoUpdates); });
+            miAutoUpdate.Checked = AutoUpdates;
+            menu.Items.Add(miUpdate); menu.Items.Add(miAutoUpdate);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(new ToolStripMenuItem("Выход", null, delegate { ExitApp(); }));
 
             tray = new NotifyIcon();
             tray.Icon = icoIdle;
             tray.Visible = true;
             tray.ContextMenuStrip = menu;
+            tray.BalloonTipClicked += delegate { if (pendingUpdate != null && !updateBusy) OfferUpdate(); };
             tray.Text = "WorkTimer";
             tray.MouseClick += delegate(object s, MouseEventArgs e)
             {
@@ -881,7 +1137,7 @@ namespace WorkTimer
             Text = "WorkTimer — учёт рабочих часов";
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(W, H);
+            ClientSize = new Size(TotalW, H);
             // ShowInTaskbar НЕ переключаем на лету: WinForms при смене этого
             // свойства пересоздаёт окно, а свёрнутое безрамочное окно без кнопки
             // на панели задач превращается в огрызок в углу экрана
@@ -892,7 +1148,7 @@ namespace WorkTimer
             Font = Skin.F(9.5f, FontStyle.Regular);
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer, true);
-            IntPtr rgn = CreateRoundRectRgn(0, 0, W + 1, H + 1, 20, 20);
+            IntPtr rgn = CreateRoundRectRgn(0, 0, TotalW + 1, H + 1, 20, 20);
             Region = Region.FromHrgn(rgn);
             DeleteObject(rgn);
 
@@ -902,7 +1158,7 @@ namespace WorkTimer
             btCfg.Font = Skin.F(11f, FontStyle.Regular);
             btCfg.ForeColor = Skin.Muted;
             btCfg.Radius = 8;
-            btCfg.SetBounds(W - 112, 14, 28, 28);
+            btCfg.SetBounds(TotalW - 112, 14, 28, 28);
             btCfg.Click += delegate { OpenSettings(); };
             Controls.Add(btCfg);
 
@@ -912,7 +1168,7 @@ namespace WorkTimer
             btMin.Font = Skin.F(10f, FontStyle.Regular);
             btMin.ForeColor = Skin.Muted;
             btMin.Radius = 8;
-            btMin.SetBounds(W - 78, 14, 28, 28);
+            btMin.SetBounds(TotalW - 78, 14, 28, 28);
             btMin.Click += delegate { WindowState = FormWindowState.Minimized; };
             Controls.Add(btMin);
 
@@ -923,7 +1179,7 @@ namespace WorkTimer
             btClose.ForeColor = Skin.Muted;
             btClose.Danger = true;
             btClose.Radius = 8;
-            btClose.SetBounds(W - 44, 14, 28, 28);
+            btClose.SetBounds(TotalW - 44, 14, 28, 28);
             btClose.Click += delegate { HideWindow(); };
             Controls.Add(btClose);
 
@@ -997,6 +1253,25 @@ namespace WorkTimer
             btHide.Click += delegate { HideWindow(); };
             Controls.Add(btHide);
 
+            GButton addProject = new GButton();
+            addProject.Text = "+ Добавить работу";
+            addProject.SetBounds(W, 106, 250, 38);
+            addProject.Click += delegate { AddProject(); };
+            Controls.Add(addProject);
+
+            projectList = new ProjectList();
+            projectList.SetBounds(W, 156, 250, 454);
+            projectList.Selected = SelectProject;
+            projectList.Toggled = ToggleProject;
+            Controls.Add(projectList);
+
+            GButton renameProject = new GButton();
+            renameProject.Text = "Переименовать";
+            renameProject.ForeColor = Skin.Muted;
+            renameProject.SetBounds(W, 622, 250, 38);
+            renameProject.Click += delegate { RenameProject(); };
+            Controls.Add(renameProject);
+
             MouseDown += delegate(object s, MouseEventArgs e)
             {
                 if (e.Button == MouseButtons.Left && e.Y < 56)
@@ -1016,13 +1291,21 @@ namespace WorkTimer
 
             using (SolidBrush bg = new SolidBrush(Skin.Bg)) g.FillRectangle(bg, ClientRectangle);
 
+            TextRenderer.DrawText(g, "Работы", Skin.F(14f, FontStyle.Bold),
+                new Rectangle(W, 66, 250, 28), Skin.Text, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Запущено одновременно: " + RunningCount, Skin.F(9f, FontStyle.Bold),
+                new Rectangle(W, 676, 250, 20), AnyRunning ? Skin.Green : Skin.Muted,
+                TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Каждая работа считает своё время", Skin.F(8f, FontStyle.Regular),
+                new Rectangle(W, 702, 250, 18), Skin.Dim, TextFormatFlags.NoPadding);
+
             bool running = Running;
             bool paused = !running && sessionAccumMin > 0;
 
             // Во время учёта карточка перерисовывается 20 раз в секунду.
             // Рисуем только то, что попало в область обновления.
             Rectangle clip = Rectangle.Ceiling(g.VisibleClipBounds);
-            bool needHead = clip.IntersectsWith(new Rectangle(0, 0, W, 58));
+            bool needHead = clip.IntersectsWith(new Rectangle(0, 0, TotalW, 58));
             bool needHero = clip.IntersectsWith(HeroRect);
             bool needRest = clip.Bottom > MonthRect.Y - 40;
 
@@ -1094,6 +1377,10 @@ namespace WorkTimer
             TextRenderer.DrawText(g, st, Skin.F(8f, FontStyle.Bold),
                 new Rectangle((int)pill.X + 23, (int)pill.Y, (int)pill.Width, (int)pill.Height), acc,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+            TextRenderer.DrawText(g, currentProject.Name, Skin.F(9f, FontStyle.Bold),
+                new Rectangle(HeroRect.X + 192, HeroRect.Y + 22, HeroRect.Width - 212, 22), Skin.A2,
+                TextFormatFlags.Right | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
 
             string big = Fmt(TodayMinutes());
             {
@@ -1177,7 +1464,7 @@ namespace WorkTimer
                 new Rectangle(22, MonthRect.Bottom + 10, W - 44, 18), Skin.Dim,
                 TextFormatFlags.Left | TextFormatFlags.NoPadding);
             TextRenderer.DrawText(g, "2 клика по дню — правка", Skin.F(8f, FontStyle.Regular),
-                new Rectangle(22, MonthRect.Bottom + 10, W - 44, 18), Color.FromArgb(70, 79, 100),
+                new Rectangle(MonthRect.X + 14, MonthRect.Y + 64, MonthRect.Width - 28, 18), Color.FromArgb(70, 79, 100),
                 TextFormatFlags.Right | TextFormatFlags.NoPadding);
         }
 
@@ -1263,6 +1550,7 @@ namespace WorkTimer
         internal bool RunningPub { get { return Running; } }
         internal double TodayPub { get { return TodayMinutes(); } }
         internal double SessionPub { get { return CurrentSessionMinutes(); } }
+        internal string ProjectNamePub { get { return currentProject.Name; } }
         internal void TogglePub() { ToggleRun(); }
         internal void OpenMainPub() { if (!Visible) ToggleWindow(); else { Activate(); BringToFront(); } }
         internal void ShowMenuAt(Point screenPt) { menu.Show(screenPt); }
@@ -1294,7 +1582,7 @@ namespace WorkTimer
                     }
                 }
                 File.Move(Store.OverridesFile, Store.OverridesFile + ".old");
-                Store.SaveAdjust(overrides);
+                Store.SaveAdjust(projects);
             }
             catch (Exception ex) { Store.Log("перенос overrides.csv", ex); }
         }
@@ -1302,10 +1590,60 @@ namespace WorkTimer
         // сумма по дням только из отрезков, без ручных поправок
         Dictionary<DateTime, double> BuildRawMap()
         {
+            return BuildRawMap(currentProject, DateTime.Now);
+        }
+
+        Dictionary<DateTime, double> BuildRawMap(WorkProject project, DateTime now)
+        {
             Dictionary<DateTime, double> map = new Dictionary<DateTime, double>();
-            foreach (Segment g in segments) AddSpan(map, g.Start, g.End);
-            if (Running) AddSpan(map, runStart.Value, DateTime.Now);
+            foreach (Segment g in segments)
+                if (g.ProjectId == project.Id) AddSpan(map, g.Start, g.End);
+            if (project.RunStart.HasValue) AddSpan(map, project.RunStart.Value, now);
             return map;
+        }
+
+        void SelectProject(WorkProject project)
+        {
+            currentProject = project;
+            settings["project"] = project.Id;
+            Store.SaveSettings(settings);
+            DropCache(); lastRowsKey = ""; lastBig = "";
+            UpdateAll();
+        }
+
+        void AddProject()
+        {
+            string name = Prompt.Show(this, "Новая работа", "Название проекта, клиента или задачи", "");
+            if (!ValidProjectName(name, null)) return;
+            WorkProject p = new WorkProject(Guid.NewGuid().ToString("N"), name.Trim());
+            projects.Add(p);
+            SaveNow(); SelectProject(p);
+        }
+
+        bool ValidProjectName(string name, WorkProject except)
+        {
+            if (name == null) return false;
+            name = name.Trim();
+            if (name.Length == 0 || name.Length > 100 || name.IndexOfAny(new char[] { '\r', '\n', '\t' }) >= 0)
+            {
+                MessageBox.Show("Введите название от 1 до 100 символов в одну строку.", "WorkTimer");
+                return false;
+            }
+            if (projects.Exists(delegate(WorkProject p)
+                { return p != except && string.Equals(p.Name, name, StringComparison.CurrentCultureIgnoreCase); }))
+            {
+                MessageBox.Show("Работа с таким названием уже есть.", "WorkTimer");
+                return false;
+            }
+            return true;
+        }
+
+        void RenameProject()
+        {
+            string name = Prompt.Show(this, "Название работы", "История и часы сохранятся", currentProject.Name);
+            if (!ValidProjectName(name, currentProject)) return;
+            currentProject.Name = name.Trim();
+            SaveNow(); UpdateAll();
         }
 
         void OpenSettings()
@@ -1373,8 +1711,13 @@ namespace WorkTimer
 
         void ToggleRun()
         {
-            if (Running) CloseSegment();
-            else runStart = DateTime.Now;
+            ToggleProject(currentProject);
+        }
+
+        void ToggleProject(WorkProject project)
+        {
+            if (project.RunStart.HasValue) CloseSegment(project, DateTime.Now);
+            else project.RunStart = DateTime.Now;
             DropCache(); lastRowsKey = "";
             SaveNow();
             UpdateAll();
@@ -1391,26 +1734,45 @@ namespace WorkTimer
 
         void CloseSegment()
         {
-            if (!runStart.HasValue) return;
-            DateTime s = runStart.Value;
-            DateTime e = DateTime.Now;
-            if ((e - s).TotalSeconds >= 1)
+            CloseSegment(currentProject, DateTime.Now);
+        }
+
+        void CloseSegment(WorkProject project, DateTime e)
+        {
+            if (!project.RunStart.HasValue) return;
+            DateTime s = project.RunStart.Value;
+            if (e > s)
             {
-                segments.Add(new Segment(s, e));
-                sessionAccumMin += (e - s).TotalMinutes;
+                segments.Add(new Segment(s, e, project.Id));
+                project.SessionMinutes += (e - s).TotalMinutes;
             }
-            runStart = null;
+            project.RunStart = null;
+        }
+
+        void CloseAllSegments()
+        {
+            DateTime now = DateTime.Now;
+            foreach (WorkProject p in projects) CloseSegment(p, now);
+            DropCache(); lastRowsKey = "";
         }
 
         void OnTick(object sender, EventArgs e)
         {
-            if (Running && (DateTime.Now - lastSave).TotalSeconds >= 15) SaveNow();
+            if (AutoUpdates && !updateBusy && DateTime.UtcNow >= updateCheckAfter)
+            {
+                updateCheckAfter = DateTime.UtcNow.AddHours(1);
+                string last; DateTime at;
+                if (!settings.TryGetValue("updateCheck", out last) ||
+                    !DateTime.TryParse(last, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out at) ||
+                    at > DateTime.UtcNow || DateTime.UtcNow - at >= TimeSpan.FromHours(24)) CheckUpdates(false);
+            }
+            if (AnyRunning && (DateTime.Now - lastSave).TotalSeconds >= 15) SaveNow();
 
             // когда окно спрятано и счёт стоит, показывать нечего — просыпаемся
             // раз в 5 секунд вместо каждой секунды
             if (!Visible)
             {
-                int want = Running ? 1000 : 5000;
+                int want = AnyRunning ? 1000 : 5000;
                 if (timer.Interval != want) timer.Interval = want;
             }
 
@@ -1435,10 +1797,13 @@ namespace WorkTimer
             try
             {
                 List<Segment> all = new List<Segment>(segments);
-                if (Running && (DateTime.Now - runStart.Value).TotalSeconds >= 1)
-                    all.Add(new Segment(runStart.Value, DateTime.Now));
+                DateTime now = DateTime.Now;
+                foreach (WorkProject p in projects)
+                    if (p.RunStart.HasValue && now > p.RunStart.Value)
+                        all.Add(new Segment(p.RunStart.Value, now, p.Id));
+                Store.SaveProjects(projects);
                 Store.SaveSegments(all);
-                Store.SaveAdjust(overrides);
+                Store.SaveAdjust(projects);
                 lastSave = DateTime.Now;
                 if (saveBroken) { saveBroken = false; Invalidate(); }
             }
@@ -1476,10 +1841,13 @@ namespace WorkTimer
 
         Dictionary<DateTime, double> BuildDayMap()
         {
-            Dictionary<DateTime, double> map = new Dictionary<DateTime, double>();
-            foreach (Segment g in segments) AddSpan(map, g.Start, g.End);
-            if (Running) AddSpan(map, runStart.Value, DateTime.Now);
-            foreach (KeyValuePair<DateTime, double> kv in overrides)
+            return BuildDayMap(currentProject, DateTime.Now);
+        }
+
+        Dictionary<DateTime, double> BuildDayMap(WorkProject project, DateTime now)
+        {
+            Dictionary<DateTime, double> map = BuildRawMap(project, now);
+            foreach (KeyValuePair<DateTime, double> kv in project.Adjustments)
             {
                 double b = map.ContainsKey(kv.Key) ? map[kv.Key] : 0;
                 double v = b + kv.Value;
@@ -1528,7 +1896,7 @@ namespace WorkTimer
         {
             if (!Visible && timer != null)
             {
-                int want = Running ? 1000 : 5000;
+                int want = AnyRunning ? 1000 : 5000;
                 if (timer.Interval != want) timer.Interval = want;
             }
             UpdateTrayText();
@@ -1538,19 +1906,33 @@ namespace WorkTimer
 
         void UpdateTrayText()
         {
-            bool paused = !Running && sessionAccumMin > 0;
-            string state = Running ? "Идёт учёт" : (paused ? "Пауза" : "Остановлен");
-            tray.Icon = Running ? icoRun : (paused ? icoPause : icoIdle);
-            string t = state + " • сегодня " + Fmt(TodayMinutes());
+            bool paused = projects.Exists(delegate(WorkProject p) { return p.SessionMinutes > 0; });
+            string state = AnyRunning ? "Идёт учёт: " + RunningCount : (paused ? "Пауза" : "Остановлен");
+            tray.Icon = AnyRunning ? icoRun : (paused ? icoPause : icoIdle);
+            string t = state + " • " + currentProject.Name + " " + Fmt(TodayMinutes());
             if (t.Length > 62) t = t.Substring(0, 62);
             tray.Text = t;
-            miStartPause.Text = Running ? "Пауза" : (paused ? "Продолжить" : "Старт");
+            miStartPause.Text = (Running ? "Пауза: " : (sessionAccumMin > 0 ? "Продолжить: " : "Старт: ")) + currentProject.Name;
+            miStop.Text = "Стоп: " + currentProject.Name;
             miShow.Text = Visible ? "Скрыть окно" : "Показать окно";
         }
 
         void UpdateWindow()
         {
             if (!Visible) return;
+            List<ProjectRow> projectRows = new List<ProjectRow>();
+            DateTime now = DateTime.Now;
+            foreach (WorkProject p in projects)
+            {
+                Dictionary<DateTime, double> projectMap = BuildDayMap(p, now);
+                ProjectRow row = new ProjectRow(); row.Project = p;
+                row.Today = projectMap.ContainsKey(now.Date) ? projectMap[now.Date] : 0;
+                foreach (KeyValuePair<DateTime, double> kv in projectMap)
+                    if (kv.Key.Year == viewMonth.Year && kv.Key.Month == viewMonth.Month) row.Month += kv.Value;
+                projectRows.Add(row);
+            }
+            projectList.RefreshRows(projectRows, currentProject);
+            Invalidate(new Rectangle(W, 670, 250, 60));
             bool running = Running;
             bool paused = !running && sessionAccumMin > 0;
 
@@ -1562,7 +1944,7 @@ namespace WorkTimer
             }
             else { btStartPause.A = Skin.A1; btStartPause.B = Skin.A2; }
             btStartPause.Invalidate();
-            Icon = running ? icoRun : (paused ? icoPause : icoIdle);
+            Icon = AnyRunning ? icoRun : (paused ? icoPause : icoIdle);
 
             string big = Fmt(TodayMinutes());
             if (lastBig.Length > 0 && big != lastBig) popT = 1f;
@@ -1570,7 +1952,8 @@ namespace WorkTimer
 
             // список по дням пересобираем только когда есть что менять,
             // а не каждую секунду
-            string rowsKey = viewMonth.ToString("yyyyMM") + "|" + segments.Count + "|" +
+            string rowsKey = currentProject.Id + "|" + now.ToString("yyyyMMdd") + "|" +
+                             viewMonth.ToString("yyyyMM") + "|" + segments.Count + "|" +
                              overrides.Count + "|" + big + "|" + running;
             if (rowsKey == lastRowsKey) { Invalidate(HeroRect); return; }
             lastRowsKey = rowsKey;
@@ -1690,35 +2073,156 @@ namespace WorkTimer
             dlg.FileName = from.Year == to.Year && from.Month == to.Month
                 ? string.Format("worktime_{0:yyyy-MM}.csv", from)
                 : string.Format("worktime_{0:yyyy-MM-dd}_{1:yyyy-MM-dd}.csv", from, to);
+            string safeName = currentProject.Name;
+            foreach (char c in Path.GetInvalidFileNameChars()) safeName = safeName.Replace(c, '_');
+            dlg.FileName = safeName + "_" + dlg.FileName;
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-            Dictionary<DateTime, double> map = BuildDayMap();
+            double total; int worked;
+            string csv = BuildExport(currentProject, from, to, out total, out worked);
+            File.WriteAllText(dlg.FileName, csv, Encoding.UTF8);
+            MessageBox.Show(string.Format("Сохранено: {0}{3}{1} дн., всего {2}",
+                dlg.FileName, worked, Fmt(total), Environment.NewLine), "WorkTimer");
+        }
+
+        static string CsvCell(string text)
+        {
+            if (text.Length > 0 && "=+-@".IndexOf(text[0]) >= 0) text = "'" + text;
+            return "\"" + text.Replace("\"", "\"\"") + "\"";
+        }
+
+        string BuildExport(WorkProject project, DateTime from, DateTime to, out double total, out int worked)
+        {
+            Dictionary<DateTime, double> map = BuildDayMap(project, DateTime.Now);
             CultureInfo ru = Ru;
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("Дата;День недели;Часы (чч:мм);Часы (десятичные)");
-            double total = 0;
-            int worked = 0;
+            sb.AppendLine("Работа;Дата;День недели;Часы (чч:мм);Часы (десятичные)");
+            total = 0;
+            worked = 0;
             for (DateTime day = from; day <= to; day = day.AddDays(1))
             {
                 double m = map.ContainsKey(day) ? map[day] : 0;
                 if (m <= 0) continue;
                 total += m; worked++;
-                sb.AppendLine(string.Format("{0};{1};{2};{3}",
-                    day.ToString("dd.MM.yyyy"), day.ToString("ddd", ru), Fmt(m),
+                sb.AppendLine(string.Format("{0};{1};{2};{3};{4}",
+                    CsvCell(project.Name), day.ToString("dd.MM.yyyy"), day.ToString("ddd", ru), Fmt(m),
                     (m / 60.0).ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',')));
             }
             sb.AppendLine();
-            sb.AppendLine(string.Format("Период;{0} — {1};;", from.ToString("dd.MM.yyyy"),
+            sb.AppendLine(string.Format("Период;{0} — {1};;;", from.ToString("dd.MM.yyyy"),
                 to.ToString("dd.MM.yyyy")));
-            sb.AppendLine(string.Format("Рабочих дней;{0};;", worked));
-            sb.AppendLine(string.Format("ИТОГО;;{0};{1}", Fmt(total),
+            sb.AppendLine(string.Format("Рабочих дней;{0};;;", worked));
+            sb.AppendLine(string.Format("ИТОГО;;;{0};{1}", Fmt(total),
                 (total / 60.0).ToString("0.00", CultureInfo.InvariantCulture).Replace('.', ',')));
-            File.WriteAllText(dlg.FileName, sb.ToString(), Encoding.UTF8);
-            MessageBox.Show(string.Format("Сохранено: {0}{3}{1} дн., всего {2}",
-                dlg.FileName, worked, Fmt(total), Environment.NewLine), "WorkTimer");
+            return sb.ToString();
         }
 
         // ---------- автозапуск ----------
+        void UpdateCallback(Action action)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            try { BeginInvoke(action); } catch (InvalidOperationException) { }
+        }
+
+        void CheckUpdates(bool manual)
+        {
+            if (updateBusy) return;
+            updateBusy = true; miUpdate.Enabled = false;
+            settings["updateCheck"] = DateTime.UtcNow.ToString("o"); Store.SaveSettings(settings);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    UpdateRelease release = Updates.Check();
+                    UpdateCallback(delegate
+                    {
+                        updateBusy = false; miUpdate.Enabled = true; pendingUpdate = release;
+                        miUpdate.Text = release == null ? "Проверить обновления (" + Updates.Current + ")" : "Обновить до " + release.Version;
+                        if (release == null)
+                        {
+                            if (manual) MessageBox.Show("Установлена версия " + Updates.Current + ". Более новой версии на GitHub нет.", "WorkTimer");
+                        }
+                        else if (manual) OfferUpdate();
+                        else
+                        {
+                            if (!AutoUpdates) return;
+                            string notified;
+                            if (settings.TryGetValue("updateNotified", out notified) && notified == release.Version.ToString()) return;
+                            settings["updateNotified"] = release.Version.ToString(); Store.SaveSettings(settings);
+                            tray.BalloonTipTitle = "WorkTimer: доступна версия " + release.Version;
+                            tray.BalloonTipText = "Нажмите, чтобы скачать и установить обновление.";
+                            tray.BalloonTipIcon = ToolTipIcon.Info; tray.ShowBalloonTip(15000);
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Store.Log("проверка обновлений", ex);
+                    UpdateCallback(delegate
+                    {
+                        updateBusy = false; miUpdate.Enabled = true;
+                        if (manual) MessageBox.Show("Не удалось проверить обновления. Проверьте интернет и попробуйте ещё раз.\r\n" + ex.Message, "WorkTimer");
+                    });
+                }
+            });
+        }
+
+        void OfferUpdate()
+        {
+            if (updateBusy || pendingUpdate == null) return;
+            UpdateRelease release = pendingUpdate;
+            if (MessageBox.Show("Доступна версия " + release.Version + ". Скачать и установить?\r\n" +
+                "Часы сохранятся, запущенные работы продолжат учёт после перезапуска.", "Обновление WorkTimer",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
+            updateBusy = true; miUpdate.Enabled = false; miUpdate.Text = "Скачивается обновление…";
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    string stage = Updates.Download(release);
+                    UpdateCallback(delegate
+                    {
+                        try { InstallUpdate(stage, release); }
+                        catch (Exception ex) { UpdateFailed(ex); }
+                    });
+                }
+                catch (Exception ex) { UpdateCallback(delegate { UpdateFailed(ex); }); }
+            });
+        }
+
+        void UpdateFailed(Exception ex)
+        {
+            Store.Log("обновление", ex);
+            updateBusy = false; miUpdate.Enabled = true; miUpdate.Text = "Обновить до " + pendingUpdate.Version;
+            MessageBox.Show("Не удалось обновить таймер. Часы продолжают считаться.\r\n" + ex.Message,
+                "WorkTimer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        void InstallUpdate(string stage, UpdateRelease release)
+        {
+            string target = Application.ExecutablePath;
+            Version downloaded;
+            if (!Version.TryParse(System.Diagnostics.FileVersionInfo.GetVersionInfo(stage).FileVersion, out downloaded) ||
+                new Version(downloaded.Major, downloaded.Minor, downloaded.Build) != release.Version)
+                throw new InvalidDataException("Версия скачанного приложения не совпадает с релизом.");
+            string probe = target + ".update-probe-" + Guid.NewGuid().ToString("N");
+            using (FileStream file = new FileStream(probe, FileMode.CreateNew)) { }
+            File.Delete(probe);
+            string helper = Path.Combine(Store.Dir, "updates", "helper-" + Guid.NewGuid().ToString("N") + ".exe");
+            File.Copy(target, helper);
+            List<string> resume = new List<string>();
+            foreach (WorkProject p in projects) if (p.RunStart.HasValue) resume.Add(p.Id);
+            settings["updateResume"] = string.Join(",", resume.ToArray()); Store.SaveSettings(settings);
+            SaveNow();
+            if (saveBroken) throw new IOException("Не удалось сохранить часы; обновление отложено.");
+            string arguments = "--apply-update " + System.Diagnostics.Process.GetCurrentProcess().Id + " " +
+                Updates.QuoteArg(target) + " " + Updates.QuoteArg(stage) + " " + Updates.QuoteArg(release.Digest);
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(helper, arguments);
+            start.UseShellExecute = false; start.CreateNoWindow = true;
+            System.Diagnostics.Process.Start(start);
+            ExitApp();
+        }
+
         bool IsAutostart()
         {
             try
@@ -1752,7 +2256,7 @@ namespace WorkTimer
 
         void ExitApp()
         {
-            if (Running) CloseSegment();
+            CloseAllSegments();
             SaveNow();
             SaveWidgetPos();
             if (hotkeyRegistered) { UnregisterHotKey(Handle, HOTKEY_ID); hotkeyRegistered = false; }
@@ -1857,7 +2361,7 @@ namespace WorkTimer
         string Key()
         {
             return app.RunningPub + "|" + TrayApp.Fmt(app.TodayPub) + "|" +
-                   TrayApp.Fmt(app.SessionPub) + "|" + hover + overBtn + overChev + expanded;
+                   TrayApp.Fmt(app.SessionPub) + "|" + app.ProjectNamePub + "|" + hover + overBtn + overChev + expanded;
         }
 
         public void Refresh2() { lastKey = ""; Beat(); }
@@ -1996,10 +2500,14 @@ namespace WorkTimer
                 LinearGradientMode.Horizontal))
                 g.DrawString(big, bf, lg, 31, oy + 11, StringFormat.GenericTypographic);
 
-            string sub = run || paused ? "сессия " + TrayApp.Fmt(app.SessionPub) : "остановлен";
-            using (SolidBrush sb = new SolidBrush(Color.FromArgb(190, Skin.Dim)))
-                g.DrawString(sub, Skin.F(7.5f, FontStyle.Regular), sb, 33, oy + 43,
-                    StringFormat.GenericTypographic);
+            using (SolidBrush sb = new SolidBrush(Color.FromArgb(210, Skin.Muted)))
+            using (StringFormat sf = new StringFormat())
+            {
+                sf.Trimming = StringTrimming.EllipsisCharacter;
+                sf.FormatFlags = StringFormatFlags.NoWrap;
+                g.DrawString(app.ProjectNamePub, Skin.F(7.5f, FontStyle.Regular), sb,
+                    new RectangleF(33, oy + 43, BtnRect.X - 39, 18), sf);
+            }
 
             // --- кнопка старт/пауза ---
             Rectangle br = BtnRect;
@@ -2370,10 +2878,10 @@ namespace WorkTimer
     class SettingsDialog : Form
     {
         readonly TrayApp app;
-        GButton bWidget, bHotkey, bAuto, bClose, bDone;
+        GButton bWidget, bHotkey, bAuto, bClose, bDone, bUpdates;
         GSlider slider;
 
-        const int W = 420, H = 356;
+        const int W = 420, H = 404;
 
         public SettingsDialog(TrayApp owner)
         {
@@ -2410,6 +2918,8 @@ namespace WorkTimer
 
             bAuto = Mk(GButton.Kind.Ghost, "", W - 140, 244, 116, 34);
             bAuto.Click += delegate { app.ToggleAutostartPub(); Sync(); };
+            bUpdates = Mk(GButton.Kind.Ghost, "", W - 140, 290, 116, 34);
+            bUpdates.Click += delegate { app.SetAutoUpdates(!app.AutoUpdates); Sync(); };
 
             bDone = Mk(GButton.Kind.Primary, "Готово", 20, H - 52, 120, 36);
             bDone.Font = Skin.F(9.5f, FontStyle.Bold);
@@ -2457,6 +2967,7 @@ namespace WorkTimer
             Mark(bWidget, app.WidgetOn);
             Mark(bHotkey, app.HotkeyOn);
             Mark(bAuto, app.AutostartOn);
+            Mark(bUpdates, app.AutoUpdates);
             slider.Value = (float)((app.WidgetAlpha - 0.35) / 0.65);
             slider.Invalidate();
             Invalidate();
@@ -2488,6 +2999,7 @@ namespace WorkTimer
 
             Row(g, 198, "Ctrl + Alt + Space", "глобально: старт и пауза, не открывая окно");
             Row(g, 244, "Запускать с Windows", "стартовать вместе с системой");
+            Row(g, 290, "Проверять обновления", "раз в сутки · версия " + Updates.Current);
 
             using (Pen p = new Pen(Color.FromArgb(32, 38, 54), 1f))
             {
