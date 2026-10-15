@@ -11,8 +11,8 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
 
 namespace WorkTimer
 {
@@ -459,6 +459,7 @@ namespace WorkTimer
         public List<ProjectRow> Rows = new List<ProjectRow>();
         public WorkProject Current;
         public Action<WorkProject> Selected, Toggled;
+        public Action<WorkProject> DeleteRequested;
         int scroll;
         const int RowHeight = 76;
         int MaxScroll { get { return Math.Max(0, Rows.Count * RowHeight - Height); } }
@@ -519,6 +520,12 @@ namespace WorkTimer
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Right && DeleteRequested != null)
+            {
+                int row = (e.Y + scroll) / RowHeight;
+                if (row >= 0 && row < Rows.Count) DeleteRequested(Rows[row].Project);
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             int index = (e.Y + scroll) / RowHeight;
             if (index < 0 || index >= Rows.Count) return;
@@ -827,7 +834,7 @@ namespace WorkTimer
         ToolStripMenuItem miUpdate, miAutoUpdate;
         bool updateBusy;
         UpdateRelease pendingUpdate;
-        DateTime updateCheckAfter = DateTime.UtcNow.AddSeconds(5);
+        DateTime updateCheckAfter = DateTime.MinValue;
 
         string monthTitle = "", monthTotal = "0:00", statsLine = "";
 
@@ -877,6 +884,9 @@ namespace WorkTimer
         }
 
         internal bool WidgetOn { get { return hud != null && !hud.IsDisposed; } }
+        internal List<WorkProject> ProjectsPub { get { return projects; } }
+        internal WorkProject CurrentProjectPub { get { return currentProject; } }
+        internal void SelectProjectPub(WorkProject project) { SelectProject(project); }
         internal void RefreshWidgetAlpha() { if (WidgetOn) hud.ApplyAlpha(); }
         internal void ToggleWidgetPub() { ToggleWidget(); }
         internal bool AutostartOn { get { return IsAutostart(); } }
@@ -993,6 +1003,7 @@ namespace WorkTimer
             if (Array.IndexOf(startupArgs, "--update-failed") >= 0)
                 MessageBox.Show("Не удалось установить обновление. Запущена прежняя версия; часы сохранены. Подробности в errors.log.",
                     "WorkTimer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (AutoUpdates) CheckUpdates(false);
         }
 
         protected override CreateParams CreateParams
@@ -1263,14 +1274,22 @@ namespace WorkTimer
             projectList.SetBounds(W, 156, 250, 454);
             projectList.Selected = SelectProject;
             projectList.Toggled = ToggleProject;
+            projectList.DeleteRequested = DeleteProject;
             Controls.Add(projectList);
 
             GButton renameProject = new GButton();
             renameProject.Text = "Переименовать";
             renameProject.ForeColor = Skin.Muted;
-            renameProject.SetBounds(W, 622, 250, 38);
+            renameProject.SetBounds(W, 622, 121, 38);
             renameProject.Click += delegate { RenameProject(); };
             Controls.Add(renameProject);
+
+            GButton deleteProject = new GButton();
+            deleteProject.Text = "Удалить";
+            deleteProject.ForeColor = Skin.Muted;
+            deleteProject.SetBounds(W + 129, 622, 121, 38);
+            deleteProject.Click += delegate { DeleteProject(currentProject); };
+            Controls.Add(deleteProject);
 
             MouseDown += delegate(object s, MouseEventArgs e)
             {
@@ -1646,6 +1665,24 @@ namespace WorkTimer
             SaveNow(); UpdateAll();
         }
 
+        void DeleteProject(WorkProject project)
+        {
+            if (projects.Count <= 1)
+            {
+                MessageBox.Show("Нельзя удалить последнюю оставшуюся работу.", "WorkTimer");
+                return;
+            }
+            if (MessageBox.Show("Удалить работу «" + project.Name + "»?\r\n" +
+                "Вместе с ней будут удалены учтённые часы и ручные поправки.", "Удаление работы",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            if (project.RunStart.HasValue) CloseSegment(project, DateTime.Now);
+            segments.RemoveAll(delegate(Segment s) { return s.ProjectId == project.Id; });
+            project.Adjustments.Clear();
+            projects.Remove(project);
+            if (currentProject == project) SelectProject(projects[0]);
+            else { SaveNow(); UpdateAll(); }
+        }
+
         void OpenSettings()
         {
             bool wasHidden = !Visible;
@@ -1760,7 +1797,7 @@ namespace WorkTimer
         {
             if (AutoUpdates && !updateBusy && DateTime.UtcNow >= updateCheckAfter)
             {
-                updateCheckAfter = DateTime.UtcNow.AddHours(1);
+                updateCheckAfter = DateTime.UtcNow.AddHours(24);
                 string last; DateTime at;
                 if (!settings.TryGetValue("updateCheck", out last) ||
                     !DateTime.TryParse(last, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out at) ||
@@ -2138,11 +2175,8 @@ namespace WorkTimer
                     {
                         updateBusy = false; miUpdate.Enabled = true; pendingUpdate = release;
                         miUpdate.Text = release == null ? "Проверить обновления (" + Updates.Current + ")" : "Обновить до " + release.Version;
-                        if (release == null)
-                        {
-                            if (manual) MessageBox.Show("Установлена версия " + Updates.Current + ". Более новой версии на GitHub нет.", "WorkTimer");
-                        }
-                        else if (manual) OfferUpdate();
+                        if (release == null) return;
+                        if (manual) OfferUpdate();
                         else
                         {
                             if (!AutoUpdates) return;
@@ -2286,6 +2320,7 @@ namespace WorkTimer
         Bitmap buf;                      // переиспользуемый холст
         Graphics bufG;
         System.Windows.Forms.Timer tick, fadeIn, panelAnim;
+        ContextMenuStrip projectPicker;
 
         public HudWidget(TrayApp owner)
         {
@@ -2699,7 +2734,7 @@ namespace WorkTimer
             if (e.Button == MouseButtons.Right) { app.ShowMenuAt(PointToScreen(e.Location)); return; }
             if (e.Button != MouseButtons.Left) return;
 
-            if (ChevRect.Contains(e.Location)) { ToggleExpand(); return; }
+            if (ChevRect.Contains(e.Location)) { ShowProjectPicker(); return; }
             if (InSlider(e.Location)) { draggingSlider = true; SetAlphaFromX(e.X); return; }
             if (BtnRect.Contains(e.Location)) { pressBtn = true; Render(); return; }
 
@@ -2708,6 +2743,28 @@ namespace WorkTimer
             grabScreen = PointToScreen(e.Location);
             grabOrigin = Location;
             Capture = true;
+        }
+
+        void ShowProjectPicker()
+        {
+            if (projectPicker != null) projectPicker.Dispose();
+            projectPicker = new ContextMenuStrip();
+            projectPicker.Renderer = new DarkRenderer();
+            projectPicker.BackColor = Skin.Card;
+            projectPicker.ForeColor = Skin.Text;
+            projectPicker.Font = Skin.F(9f, FontStyle.Regular);
+            foreach (WorkProject p in app.ProjectsPub)
+            {
+                WorkProject target = p;
+                ToolStripMenuItem item = new ToolStripMenuItem(p.Name);
+                item.Checked = p == app.CurrentProjectPub;
+                item.Click += delegate { app.SelectProjectPub(target); Refresh2(); };
+                projectPicker.Items.Add(item);
+            }
+            projectPicker.Items.Add(new ToolStripSeparator());
+            projectPicker.Items.Add(new ToolStripMenuItem("Прозрачность виджета…", null,
+                delegate { if (!expanded) ToggleExpand(); }));
+            projectPicker.Show(this, new Point(ChevRect.X, Oy + WHBase));
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -2999,7 +3056,7 @@ namespace WorkTimer
 
             Row(g, 198, "Ctrl + Alt + Space", "глобально: старт и пауза, не открывая окно");
             Row(g, 244, "Запускать с Windows", "стартовать вместе с системой");
-            Row(g, 290, "Проверять обновления", "раз в сутки · версия " + Updates.Current);
+            Row(g, 290, "Автоматически проверять обновления", "версия " + Updates.Current);
 
             using (Pen p = new Pen(Color.FromArgb(32, 38, 54), 1f))
             {
