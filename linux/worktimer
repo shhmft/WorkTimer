@@ -908,7 +908,7 @@ class ProjectPicker(Gtk.Window):
 
     def __init__(self, widget):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
-        self.widget = widget
+        self.owner_widget = widget
         self.projects = list(widget.core.projects)
         self.first = 0
         self.hot = -1
@@ -937,16 +937,16 @@ class ProjectPicker(Gtk.Window):
 
     def show_picker(self, ev):
         self.show_all()
-        screen = self.widget.get_screen()
-        wx, wy = self.widget.get_position()
-        _, widget_height = self.widget.get_size()
+        screen = self.owner_widget.get_screen()
+        wx, wy = self.owner_widget.get_position()
+        _, widget_height = self.owner_widget.get_size()
         x, y = wx, wy + widget_height
         monitor = screen.get_monitor_at_point(int(ev.x_root), int(ev.y_root))
         area = screen.get_monitor_workarea(monitor)
         _, height = self.get_size()
         if y + height > area.y + area.height:
             y = wy - height
-        x = max(area.x + 4, min(x, area.x + area.width - self.widget.WW - 4))
+        x = max(area.x + 4, min(x, area.x + area.width - self.owner_widget.WW - 4))
         y = max(area.y + 4, min(y, area.y + area.height - height - 4))
         self.move(int(x), int(y))
         self.present()
@@ -966,7 +966,7 @@ class ProjectPicker(Gtk.Window):
         cr.set_source_rgba(*A1, 0.38 * a)
         cr.set_line_width(1)
         cr.stroke()
-        selected = self.widget.core.current
+        selected = self.owner_widget.core.current
         for row in range(self.rows):
             index = self.first + row
             if index >= len(self.projects):
@@ -1019,15 +1019,15 @@ class ProjectPicker(Gtk.Window):
             if self.PAD <= ev.y < self.PAD + self.rows * self.ROW_H and index < len(self.projects):
                 project = self.projects[index]
                 self.destroy()
-                self.widget.project_picker = None
-                self.widget.select_project(project)
+                self.owner_widget.project_picker = None
+                self.owner_widget.select_project(project)
                 return True
         return True
 
     def on_key(self, _w, ev):
         if ev.keyval == Gdk.KEY_Escape:
             self.destroy()
-            self.widget.project_picker = None
+            self.owner_widget.project_picker = None
         return True
 
     def on_focus_out(self, *_):
@@ -1039,7 +1039,7 @@ class ProjectPicker(Gtk.Window):
             return False
         if not self.is_active():
             self.destroy()
-            self.widget.project_picker = None
+            self.owner_widget.project_picker = None
         return False
 
 
