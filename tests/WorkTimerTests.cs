@@ -65,6 +65,8 @@ namespace WorkTimer
                 Call(app, "ToggleRun");
                 second.RunStart = DateTime.Now.AddMinutes(-20);
                 Check(first.RunStart.HasValue && second.RunStart.HasValue, "Two timers run independently");
+                Check(app.WidgetCaptionPub == first.Name + ", " + second.Name,
+                    "Widget caption lists all running works");
                 Near(85, Map(app, first, DateTime.Now)[today], "First work counts only its own time");
                 Near(20, Map(app, second, DateTime.Now)[today], "Second work excludes legacy hours");
                 Call(app, "SaveNow");
@@ -77,6 +79,8 @@ namespace WorkTimer
                 Check(!first.RunStart.HasValue && second.RunStart.HasValue, "Pause one work keeps the other running");
                 Call(app, "SelectProject", first);
                 Call(app, "StopSession");
+                Check(app.WidgetCaptionPub == second.Name,
+                    "Widget caption lists the remaining running work");
                 Check(first.SessionMinutes == 0 && second.RunStart.HasValue, "Stop resets only selected session");
                 Near(85, Map(app, first, DateTime.Now)[today], "Stop preserves daily hours");
                 // While an idle work is selected, the background work must still autosave.
@@ -159,6 +163,8 @@ namespace WorkTimer
                 Call(app, "ToggleProject", second);
                 Call(app, "FlushForShutdown");
                 Check(!first.RunStart.HasValue && !second.RunStart.HasValue, "Shutdown/sleep closes every running work");
+                Check(app.WidgetCaptionPub == second.Name,
+                    "Widget caption shows selected work when all timers are stopped");
                 Check(Store.LoadSegments().Count == segments.Count, "Shutdown saves all closed intervals");
 
                 // Render the actual form with representative parallel timers for visual inspection.

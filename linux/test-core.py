@@ -118,10 +118,14 @@ first.run_start = dt.datetime.now() - dt.timedelta(minutes=10)
 c.toggle(second)
 second.run_start = dt.datetime.now() - dt.timedelta(minutes=20)
 check("два таймера запущены", c.running_count, 2)
+check("виджет показывает все активные работы", c.widget_caption,
+      first.name + ", " + second.name)
 check("часы первой работы", wt.fmt(c.day_map(first)[d]), "1:25")
 check("часы второй работы", wt.fmt(c.today()), "0:20")
 c.select(first)
 check("смена работы не останавливает таймеры", c.running_count, 2)
+check("подпись активных работ не меняется при выборе", c.widget_caption,
+      first.name + ", " + second.name)
 c.save(); c.save()
 check("автосохранение без дублей", len(wt.load_segments()), 3)
 c.toggle(first)
@@ -168,6 +172,7 @@ for name in ("", " " * 2, "Общая работа", "a" * 101, "a\nb"):
 c.toggle(first); c.toggle(second)
 c.pause_all()
 check("пауза всех работ", c.running_count, 0)
+check("без активных работ виджет показывает выбранную", c.widget_caption, second.name)
 doomed = c.add_project("Удаляемая работа")
 doomed.adjust[d] = 12
 c.segments.append((base, base + dt.timedelta(minutes=18), doomed.id))

@@ -8,7 +8,7 @@ import tempfile
 import time
 import urllib.request
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 ENDPOINT = "https://api.github.com/repos/shhmft/WorkTimer/releases/latest"
 RELEASE_PREFIX = "https://github.com/shhmft/WorkTimer/releases/"
 MAX_SIZE = 100 * 1024 * 1024

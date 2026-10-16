@@ -7,7 +7,7 @@
 
 ### [⬇ Скачать WorkTimer.exe](https://github.com/shhmft/WorkTimer/releases/latest/download/WorkTimer.exe)
 
-![Версия 1.4.0](https://img.shields.io/badge/версия-1.4.0-7C5CFF?style=flat-square)
+![Версия 1.4.1](https://img.shields.io/badge/версия-1.4.1-7C5CFF?style=flat-square)
 ![Без зависимостей](https://img.shields.io/badge/зависимости-нет-64748B?style=flat-square)
 ![MIT](https://img.shields.io/badge/лицензия-MIT-64748B?style=flat-square)
 
@@ -150,8 +150,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-updater.ps1
 
 Проверки используют временную папку и не меняют пользовательские данные.
 
-GitHub Actions проверяет и собирает обе платформы. После объединения изменений в `main` и отправки тега `v1.4.0`
-после успешных проверок создаётся релиз с `WorkTimer.exe` и `worktimer_1.4.0_all.deb`.
+GitHub Actions проверяет и собирает обе платформы. После объединения изменений в `main` и отправки тега `v1.4.1`
+после успешных проверок создаётся релиз с `WorkTimer.exe` и `worktimer_1.4.1_all.deb`.
 Для следующего релиза обнови версии в исходниках, скрипте пакета и workflow;
 приложения найдут опубликованные файлы и их контрольные суммы через API GitHub.
 

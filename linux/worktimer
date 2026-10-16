@@ -384,6 +384,11 @@ class Core:
     def any_running(self):
         return self.running_count > 0
 
+    @property
+    def widget_caption(self):
+        active = [p.name for p in self.projects if p.run_start is not None]
+        return ", ".join(active) if active else self.current.name
+
     def select(self, project):
         self.current = project
         self.settings["project"] = project.id
@@ -1010,7 +1015,7 @@ class Widget(Gtk.Window):
 
         cr.push_group()
         text(cr, fmt(core.today()), 31, 11, 17, A2 if running else TEXT, bold=True)
-        text(cr, core.current.name, 33, 43, 7, MUTED, width=123, ellipsis=True)
+        text(cr, core.widget_caption, 33, 43, 7, MUTED, width=123, ellipsis=True)
         cr.pop_group_to_source()
         cr.paint_with_alpha(a)
 
