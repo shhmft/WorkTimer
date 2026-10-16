@@ -191,7 +191,10 @@ namespace WorkTimer
                 {
                     dialog.Show(app);
                     Application.DoEvents();
-                    Check(dialog.ClientSize.Height == 404, "Update setting fits settings window");
+                    Check(dialog.ClientSize.Height == 454, "Manual update action fits settings window");
+                    GButton checkNow = (GButton)typeof(SettingsDialog).GetField("bCheckNow", Hidden).GetValue(dialog);
+                    Check(checkNow.Text == "Проверить обновления" && checkNow.Bounds.Bottom < dialog.ClientSize.Height - 66,
+                        "Settings include a separate manual update button");
                     if (args.Length > 0)
                         using (Bitmap bitmap = new Bitmap(dialog.Width, dialog.Height))
                         {

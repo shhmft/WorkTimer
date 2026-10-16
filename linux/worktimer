@@ -902,6 +902,147 @@ class MainWindow(Gtk.Window):
 
 
 # ---------------------------------------------------------------- виджет
+class ProjectPicker(Gtk.Window):
+    """Rounded, scrollable project list styled like the floating widget."""
+    ROW_H, PAD, MAX_ROWS = 32, 8, 6
+
+    def __init__(self, widget):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.widget = widget
+        self.projects = list(widget.core.projects)
+        self.first = 0
+        self.hot = -1
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
+        self.set_app_paintable(True)
+        screen = widget.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.rows = min(self.MAX_ROWS, len(self.projects))
+        self.resize(widget.WW, self.PAD * 2 + self.rows * self.ROW_H)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
+                        Gdk.EventMask.POINTER_MOTION_MASK |
+                        Gdk.EventMask.SCROLL_MASK |
+                        Gdk.EventMask.KEY_PRESS_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_press)
+        self.connect("motion-notify-event", self.on_move)
+        self.connect("scroll-event", self.on_scroll)
+        self.connect("key-press-event", self.on_key)
+        self.connect("focus-out-event", self.on_focus_out)
+
+    def show_picker(self, ev):
+        self.show_all()
+        screen = self.widget.get_screen()
+        wx, wy = self.widget.get_position()
+        _, widget_height = self.widget.get_size()
+        x, y = wx, wy + widget_height
+        monitor = screen.get_monitor_at_point(int(ev.x_root), int(ev.y_root))
+        area = screen.get_monitor_workarea(monitor)
+        _, height = self.get_size()
+        if y + height > area.y + area.height:
+            y = wy - height
+        x = max(area.x + 4, min(x, area.x + area.width - self.widget.WW - 4))
+        y = max(area.y + 4, min(y, area.y + area.height - height - 4))
+        self.move(int(x), int(y))
+        self.present()
+        self.grab_focus()
+
+    def on_draw(self, _w, cr):
+        # The list remains readable at every widget transparency setting.
+        a = 1.0
+        width, height = self.get_size()
+        cr.set_operator(1)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(2)
+        rounded(cr, 1, 1, width - 2, height - 2, 14)
+        cr.set_source_rgba(24 / 255, 28 / 255, 40 / 255, 1.0)
+        cr.fill_preserve()
+        cr.set_source_rgba(*A1, 0.38 * a)
+        cr.set_line_width(1)
+        cr.stroke()
+        selected = self.widget.core.current
+        for row in range(self.rows):
+            index = self.first + row
+            if index >= len(self.projects):
+                break
+            y = self.PAD + row * self.ROW_H
+            if index == self.hot or self.projects[index] is selected:
+                rounded(cr, self.PAD + 1, y + 2, width - 2 * self.PAD - 2,
+                        self.ROW_H - 4, 8)
+                cr.set_source_rgba(*A1, (0.22 if index == self.hot else 0.14) * a)
+                cr.fill()
+            if self.projects[index] is selected:
+                cr.set_source_rgba(*A2, a)
+                cr.arc(self.PAD + 13, y + self.ROW_H / 2, 3, 0, 2 * math.pi)
+                cr.fill()
+            text(cr, self.projects[index].name, self.PAD + 25, y + 9, 9,
+                 A2 if self.projects[index] is selected else TEXT,
+                 width=width - self.PAD * 2 - 34, ellipsis=True)
+        if len(self.projects) > self.rows:
+            track_y, track_h = self.PAD + 3, self.rows * self.ROW_H - 6
+            thumb_h = max(18, track_h * self.rows / len(self.projects))
+            thumb_y = track_y + (track_h - thumb_h) * self.first / (len(self.projects) - self.rows)
+            rounded(cr, width - 5, thumb_y, 2, thumb_h, 1)
+            cr.set_source_rgba(*MUTED, 0.55 * a)
+            cr.fill()
+        return False
+
+    def on_move(self, _w, ev):
+        row = int((ev.y - self.PAD) // self.ROW_H)
+        hot = self.first + row if self.PAD <= ev.y < self.PAD + self.rows * self.ROW_H and self.first + row < len(self.projects) else -1
+        if hot != self.hot:
+            self.hot = hot
+            self.queue_draw()
+        return False
+
+    def on_scroll(self, _w, ev):
+        if ev.direction == Gdk.ScrollDirection.DOWN:
+            step = 1
+        elif ev.direction == Gdk.ScrollDirection.UP:
+            step = -1
+        else:
+            return True
+        self.first = max(0, min(len(self.projects) - self.rows, self.first + step))
+        self.queue_draw()
+        return True
+
+    def on_press(self, _w, ev):
+        if ev.button == 1:
+            row = int((ev.y - self.PAD) // self.ROW_H)
+            index = self.first + row
+            if self.PAD <= ev.y < self.PAD + self.rows * self.ROW_H and index < len(self.projects):
+                project = self.projects[index]
+                self.destroy()
+                self.widget.project_picker = None
+                self.widget.select_project(project)
+                return True
+        return True
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            self.destroy()
+            self.widget.project_picker = None
+        return True
+
+    def on_focus_out(self, *_):
+        GLib.timeout_add(120, self.close_if_inactive)
+        return False
+
+    def close_if_inactive(self):
+        if not self.get_visible():
+            return False
+        if not self.is_active():
+            self.destroy()
+            self.widget.project_picker = None
+        return False
+
+
 class Widget(Gtk.Window):
     WW, WH = 214, 70
 
@@ -921,7 +1062,7 @@ class Widget(Gtk.Window):
         if visual:
             self.set_visual(visual)
         self.drag = None
-        self.project_menu = Gtk.Menu()
+        self.project_picker = None
 
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
                         Gdk.EventMask.BUTTON_RELEASE_MASK |
@@ -930,7 +1071,6 @@ class Widget(Gtk.Window):
         self.connect("button-press-event", self.on_press)
         self.connect("motion-notify-event", self.on_move)
         self.connect("button-release-event", self.on_release)
-        self.project_menu.connect("deactivate", lambda *_: self.queue_draw())
 
         s = self.core.settings
         try:
@@ -949,15 +1089,10 @@ class Widget(Gtk.Window):
             self.app.menu_popup(ev)
             return True
         if ev.button == 1 and ev.x >= self.WW - 30 and ev.y < 23:
-            for child in self.project_menu.get_children():
-                self.project_menu.remove(child)
-            for project in self.core.projects:
-                item = Gtk.CheckMenuItem(label=project.name)
-                item.set_active(project is self.core.current)
-                item.connect("activate", lambda _item, target=project: self.select_project(target))
-                self.project_menu.append(item)
-            self.project_menu.show_all()
-            self.project_menu.popup_at_widget(self, Gdk.Gravity.SOUTH_EAST, Gdk.Gravity.NORTH_EAST, ev)
+            if self.project_picker:
+                self.project_picker.destroy()
+            self.project_picker = ProjectPicker(self)
+            self.project_picker.show_picker(ev)
             return True
         if ev.x >= self.WW - 52 and 18 <= ev.y <= 52:
             self.core.toggle(self.core.current)
@@ -1438,6 +1573,7 @@ class App:
     def settings_dialog(self):
         d = Gtk.Dialog(title="Настройки", transient_for=self.window, modal=True)
         d.add_button("Готово", Gtk.ResponseType.OK)
+        d.add_button("Проверить обновления", 1)
         box = d.get_content_area()
         box.set_spacing(10)
         box.set_border_width(14)
@@ -1465,7 +1601,7 @@ class App:
             label="Глобальная горячая клавиша задаётся в параметрах системы:\n"
                   "команда  worktimer --toggle", xalign=0))
         d.show_all()
-        d.run()
+        response = d.run()
 
         if cb_w.get_active() != bool(self.widget):
             self.toggle_widget()
@@ -1477,6 +1613,8 @@ class App:
         if self.widget:
             self.widget.queue_draw()
         d.destroy()
+        if response == 1:
+            self.check_updates(True)
 
     def export_dialog(self):
         d = Gtk.Dialog(title="Экспорт за период", transient_for=self.window, modal=True)
