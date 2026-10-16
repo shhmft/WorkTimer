@@ -11,8 +11,8 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.4.1.0")]
 
 namespace WorkTimer
 {
@@ -1570,6 +1570,15 @@ namespace WorkTimer
         internal double TodayPub { get { return TodayMinutes(); } }
         internal double SessionPub { get { return CurrentSessionMinutes(); } }
         internal string ProjectNamePub { get { return currentProject.Name; } }
+        internal string WidgetCaptionPub
+        {
+            get
+            {
+                List<WorkProject> running = projects.FindAll(delegate(WorkProject p) { return p.RunStart.HasValue; });
+                if (running.Count == 0) return currentProject.Name;
+                return string.Join(", ", running.ConvertAll(delegate(WorkProject p) { return p.Name; }).ToArray());
+            }
+        }
         internal void TogglePub() { ToggleRun(); }
         internal void OpenMainPub() { if (!Visible) ToggleWindow(); else { Activate(); BringToFront(); } }
         internal void ShowMenuAt(Point screenPt) { menu.Show(screenPt); }
@@ -2306,9 +2315,9 @@ namespace WorkTimer
     class HudWidget : Form
     {
         readonly TrayApp app;
-        const int WW = 214, WHBase = 70, PanelH = 46;
+        const int WW = 214, WHBase = 70, PanelH = 74;
 
-        bool hover, overBtn, pressBtn, overChev, dragging, armed, draggingSlider;
+        bool hover, overBtn, pressBtn, overChev, overProject, dragging, armed, draggingSlider;
         bool expanded;
         float panelT;                    // 0 — свёрнут, 1 — панель раскрыта
         float pulse = 0;
@@ -2396,7 +2405,7 @@ namespace WorkTimer
         string Key()
         {
             return app.RunningPub + "|" + TrayApp.Fmt(app.TodayPub) + "|" +
-                   TrayApp.Fmt(app.SessionPub) + "|" + app.ProjectNamePub + "|" + hover + overBtn + overChev + expanded;
+                   TrayApp.Fmt(app.SessionPub) + "|" + app.WidgetCaptionPub + "|" + hover + overBtn + overChev + overProject + expanded;
         }
 
         public void Refresh2() { lastKey = ""; Beat(); }
@@ -2405,7 +2414,8 @@ namespace WorkTimer
         int Oy { get { return Height - WHBase; } }                       // сдвиг основной строки
         Rectangle BtnRect { get { return new Rectangle(WW - 52, Oy + WHBase / 2 - 17, 34, 34); } }
         Rectangle ChevRect { get { return new Rectangle(WW - 30, Oy + 3, 24, 16); } }
-        RectangleF Track { get { return new RectangleF(18, 30, WW - 36, 5); } }
+        Rectangle ProjectRect { get { return new Rectangle(16, 5, WW - 32, 25); } }
+        RectangleF Track { get { return new RectangleF(18, 58, WW - 36, 5); } }
 
         float AlphaToT(double a) { return (float)((a - 0.35) / 0.65); }
         double TToAlpha(float t) { return 0.35 + Math.Max(0f, Math.Min(1f, t)) * 0.65; }
@@ -2467,8 +2477,28 @@ namespace WorkTimer
             if (panelT > 0.01f)
             {
                 int a = (int)(255 * panelT);
+                Rectangle pr = ProjectRect;
+                using (GraphicsPath pp = Skin.Round(pr, 7))
+                using (SolidBrush pb = new SolidBrush(Color.FromArgb((int)((overProject ? 230 : 185) * panelT), Skin.Card2)))
+                    g.FillPath(pb, pp);
+                using (SolidBrush projectText = new SolidBrush(Color.FromArgb(a, Skin.Text)))
+                using (StringFormat projectFormat = new StringFormat())
+                {
+                    projectFormat.Trimming = StringTrimming.EllipsisCharacter;
+                    projectFormat.FormatFlags = StringFormatFlags.NoWrap;
+                    g.DrawString(app.ProjectNamePub, Skin.F(7.5f, FontStyle.Regular), projectText,
+                        new RectangleF(pr.X + 8, pr.Y + 5, pr.Width - 25, 15), projectFormat);
+                }
+                float pcx = pr.Right - 11, pcy = pr.Y + pr.Height / 2f;
+                using (Pen pp = new Pen(Color.FromArgb(a, Skin.Muted), 1.4f))
+                {
+                    pp.StartCap = LineCap.Round; pp.EndCap = LineCap.Round;
+                    g.DrawLine(pp, pcx - 3, pcy - 1, pcx, pcy + 2);
+                    g.DrawLine(pp, pcx, pcy + 2, pcx + 3, pcy - 1);
+                }
+
                 using (SolidBrush lb = new SolidBrush(Color.FromArgb((int)(180 * panelT), Skin.Dim)))
-                    g.DrawString("ПРОЗРАЧНОСТЬ", Skin.F(7f, FontStyle.Bold), lb, 17, 9,
+                    g.DrawString("ПРОЗРАЧНОСТЬ", Skin.F(7f, FontStyle.Bold), lb, 17, 38,
                         StringFormat.GenericTypographic);
 
                 string pct = Math.Round(userAlpha * 100) + "%";
@@ -2477,7 +2507,7 @@ namespace WorkTimer
                     SizeF sz = g.MeasureString(pct, Skin.F(7.5f, FontStyle.Bold),
                         1000, StringFormat.GenericTypographic);
                     g.DrawString(pct, Skin.F(7.5f, FontStyle.Bold), vb,
-                        WW - 18 - sz.Width, 8, StringFormat.GenericTypographic);
+                        WW - 18 - sz.Width, 37, StringFormat.GenericTypographic);
                 }
 
                 RectangleF tr = Track;
@@ -2540,7 +2570,7 @@ namespace WorkTimer
             {
                 sf.Trimming = StringTrimming.EllipsisCharacter;
                 sf.FormatFlags = StringFormatFlags.NoWrap;
-                g.DrawString(app.ProjectNamePub, Skin.F(7.5f, FontStyle.Regular), sb,
+                g.DrawString(app.WidgetCaptionPub, Skin.F(7.5f, FontStyle.Regular), sb,
                     new RectangleF(33, oy + 43, BtnRect.X - 39, 18), sf);
             }
 
@@ -2705,7 +2735,7 @@ namespace WorkTimer
 
         protected override void OnMouseLeave(EventArgs e)
         {
-            hover = false; overBtn = false; overChev = false; pressBtn = false;
+            hover = false; overBtn = false; overChev = false; overProject = false; pressBtn = false;
             Render(); base.OnMouseLeave(e);
         }
 
@@ -2724,8 +2754,10 @@ namespace WorkTimer
 
             bool ob = BtnRect.Contains(e.Location);
             bool oc = ChevRect.Contains(e.Location);
-            Cursor = (ob || oc || InSlider(e.Location)) ? Cursors.Hand : Cursors.SizeAll;
-            if (ob != overBtn || oc != overChev) { overBtn = ob; overChev = oc; Render(); }
+            bool op = panelT > 0.6f && ProjectRect.Contains(e.Location);
+            Cursor = (ob || oc || op || InSlider(e.Location)) ? Cursors.Hand : Cursors.SizeAll;
+            if (ob != overBtn || oc != overChev || op != overProject)
+            { overBtn = ob; overChev = oc; overProject = op; Render(); }
             base.OnMouseMove(e);
         }
 
@@ -2734,7 +2766,8 @@ namespace WorkTimer
             if (e.Button == MouseButtons.Right) { app.ShowMenuAt(PointToScreen(e.Location)); return; }
             if (e.Button != MouseButtons.Left) return;
 
-            if (ChevRect.Contains(e.Location)) { ShowProjectPicker(); return; }
+            if (panelT > 0.6f && ProjectRect.Contains(e.Location)) { ShowProjectPicker(); return; }
+            if (ChevRect.Contains(e.Location)) { ToggleExpand(); return; }
             if (InSlider(e.Location)) { draggingSlider = true; SetAlphaFromX(e.X); return; }
             if (BtnRect.Contains(e.Location)) { pressBtn = true; Render(); return; }
 
@@ -2761,10 +2794,7 @@ namespace WorkTimer
                 item.Click += delegate { app.SelectProjectPub(target); Refresh2(); };
                 projectPicker.Items.Add(item);
             }
-            projectPicker.Items.Add(new ToolStripSeparator());
-            projectPicker.Items.Add(new ToolStripMenuItem("Прозрачность виджета…", null,
-                delegate { if (!expanded) ToggleExpand(); }));
-            projectPicker.Show(this, new Point(ChevRect.X, Oy + WHBase));
+            projectPicker.Show(this, new Point(ProjectRect.X, ProjectRect.Bottom));
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -2799,6 +2829,7 @@ namespace WorkTimer
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             if (!BtnRect.Contains(e.Location) && !ChevRect.Contains(e.Location) &&
+                !(panelT > 0.6f && ProjectRect.Contains(e.Location)) &&
                 !InSlider(e.Location))
                 app.OpenMainPub();
             base.OnMouseDoubleClick(e);
