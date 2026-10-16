@@ -61,6 +61,20 @@ with tempfile.TemporaryDirectory(prefix="worktimer-gui-") as folder:
         Gtk.main_iteration_do(False)
     check(not app.update_busy and app.mi_update.get_label() == "Обновить до 1.4.0")
     check(app.core.running_count == 2)
+    def click_manual_setting(_unused=None):
+        for window in Gtk.Window.list_toplevels():
+            if isinstance(window, Gtk.Dialog) and window.get_title() == "Настройки":
+                for button in window.get_action_area().get_children():
+                    if isinstance(button, Gtk.Button) and button.get_label() == "Проверить обновления":
+                        button.clicked()
+                        return False
+        return True
+    GLib.idle_add(click_manual_setting)
+    app.settings_dialog()
+    deadline = dt.datetime.now() + dt.timedelta(seconds=3)
+    while app.update_busy and dt.datetime.now() < deadline:
+        Gtk.main_iteration_do(False)
+    check(not app.update_busy and app.mi_update.get_label() == "Обновить до 1.4.0")
     wt.updates.check_release = original_check
     # Click the first row's name: both timers must continue.
     event.x, event.y = wt.W + 30, 180
@@ -82,6 +96,18 @@ with tempfile.TemporaryDirectory(prefix="worktimer-gui-") as folder:
     check(app.core.current is first and app.core.running_count == widget_running)
     app.widget.select_project(second)
     check(app.core.current is second and app.core.running_count == widget_running)
+    for index in range(8):
+        app.core.add_project("Работа %d" % index)
+    app.core.select(first)
+    picker = wt.ProjectPicker(app.widget)
+    app.widget.project_picker = picker
+    check(picker.rows == picker.MAX_ROWS and picker.first == 0)
+    picker.on_scroll(None, types.SimpleNamespace(direction=Gdk.ScrollDirection.DOWN))
+    check(picker.first == 1)
+    picker.on_press(None, types.SimpleNamespace(button=1, y=picker.PAD + 1))
+    check(app.core.current is second and app.core.running_count == widget_running)
+    app.core.projects[:] = [first, second]
+    app.core.select(second)
     first.run_start = dt.datetime.now() - dt.timedelta(minutes=20)
     second.run_start = dt.datetime.now() - dt.timedelta(minutes=55)
     app.show_window()

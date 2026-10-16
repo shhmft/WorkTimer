@@ -11,8 +11,8 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.4.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.4.2.0")]
 
 namespace WorkTimer
 {
@@ -869,6 +869,12 @@ namespace WorkTimer
 
         internal bool AutoUpdates
         { get { string value; return !settings.TryGetValue("updates", out value) || value != "0"; } }
+        internal void CheckUpdatesManualPub()
+        {
+            if (pendingUpdate != null) OfferUpdate();
+            else CheckUpdates(true);
+        }
+
         internal void SetAutoUpdates(bool value)
         {
             settings["updates"] = value ? "1" : "0";
@@ -2329,7 +2335,7 @@ namespace WorkTimer
         Bitmap buf;                      // переиспользуемый холст
         Graphics bufG;
         System.Windows.Forms.Timer tick, fadeIn, panelAnim;
-        ContextMenuStrip projectPicker;
+        ProjectPickerForm projectPicker;
 
         public HudWidget(TrayApp owner)
         {
@@ -2780,21 +2786,119 @@ namespace WorkTimer
 
         void ShowProjectPicker()
         {
-            if (projectPicker != null) projectPicker.Dispose();
-            projectPicker = new ContextMenuStrip();
-            projectPicker.Renderer = new DarkRenderer();
-            projectPicker.BackColor = Skin.Card;
-            projectPicker.ForeColor = Skin.Text;
-            projectPicker.Font = Skin.F(9f, FontStyle.Regular);
-            foreach (WorkProject p in app.ProjectsPub)
+            if (projectPicker != null) projectPicker.Close();
+            projectPicker = new ProjectPickerForm(this, app.ProjectsPub, app.CurrentProjectPub);
+            // Stack the picker flush with the full card, aligned to its edges.
+            // This keeps it attached visually without covering the widget.
+            Point cardTop = PointToScreen(Point.Empty);
+            Point cardBottom = PointToScreen(new Point(0, Height));
+            Rectangle screen = Screen.FromPoint(cardTop).WorkingArea;
+            int x = Math.Max(screen.Left + 6, Math.Min(cardTop.X, screen.Right - projectPicker.Width - 6));
+            int y = cardBottom.Y + projectPicker.Height <= screen.Bottom
+                ? cardBottom.Y : Math.Max(screen.Top + 6, cardTop.Y - projectPicker.Height);
+            projectPicker.ShowAt(new Point(x, y));
+        }
+
+        void PickProject(WorkProject project)
+        {
+            app.SelectProjectPub(project);
+            projectPicker = null;
+            Refresh2();
+        }
+
+        // A compact, scrollable popup painted with the same rounded card and
+        // accent colors as the floating widget. Avoids the native menu theme.
+        sealed class ProjectPickerForm : Form
+        {
+            readonly HudWidget owner;
+            readonly List<WorkProject> projects;
+            readonly WorkProject selected;
+            int first, hot = -1;
+            const int RowH = 32, Pad = 8, MaxRows = 6;
+            int VisibleRows { get { return Math.Min(MaxRows, projects.Count); } }
+
+            public ProjectPickerForm(HudWidget owner, IList<WorkProject> values, WorkProject selected)
             {
-                WorkProject target = p;
-                ToolStripMenuItem item = new ToolStripMenuItem(p.Name);
-                item.Checked = p == app.CurrentProjectPub;
-                item.Click += delegate { app.SelectProjectPub(target); Refresh2(); };
-                projectPicker.Items.Add(item);
+                this.owner = owner; this.selected = selected;
+                projects = new List<WorkProject>(values);
+                FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true;
+                StartPosition = FormStartPosition.Manual; Width = WW; Height = Pad * 2 + VisibleRows * RowH;
+                // Keep the menu legible even when the underlying widget is translucent.
+                Opacity = 1.0;
+                BackColor = Color.FromArgb(24, 28, 40); Font = Skin.F(9f, FontStyle.Regular);
+                // Clip the native form itself to the card: transparent pixels
+                // outside the rounded path otherwise show as black corners.
+                using (GraphicsPath clip = Skin.Round(new Rectangle(0, 0, Width, Height), 14))
+                    Region = new Region(clip);
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                         ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
+                Deactivate += delegate { Close(); };
             }
-            projectPicker.Show(this, new Point(ProjectRect.X, ProjectRect.Bottom));
+
+            public void ShowAt(Point point) { Location = point; Show(owner); }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(BackColor);
+                Rectangle bounds = new Rectangle(1, 1, Width - 2, Height - 2);
+                using (GraphicsPath path = Skin.Round(bounds, 14))
+                using (LinearGradientBrush bg = new LinearGradientBrush(bounds,
+                    Color.FromArgb(255, 24, 28, 40), Color.FromArgb(255, 14, 17, 25), LinearGradientMode.Vertical))
+                using (Pen outline = new Pen(Color.FromArgb(75, Skin.A1), 1f))
+                { g.FillPath(bg, path); g.DrawPath(outline, path); }
+                for (int row = 0; row < VisibleRows; row++)
+                {
+                    int index = first + row; if (index >= projects.Count) break;
+                    Rectangle r = new Rectangle(Pad, Pad + row * RowH, Width - Pad * 2, RowH);
+                    bool isSelected = projects[index] == selected;
+                    if (index == hot || isSelected)
+                    {
+                        Rectangle rr = new Rectangle(r.X + 1, r.Y + 2, r.Width - 2, r.Height - 4);
+                        using (GraphicsPath rp = Skin.Round(rr, 8))
+                        using (SolidBrush fill = new SolidBrush(Color.FromArgb(index == hot ? 54 : 36, Skin.A1)))
+                            g.FillPath(fill, rp);
+                    }
+                    if (isSelected)
+                    using (SolidBrush mark = new SolidBrush(Skin.A2))
+                        g.FillEllipse(mark, r.X + 10, r.Y + 13, 6, 6);
+                    Rectangle label = new Rectangle(r.X + 25, r.Y, r.Width - 32, r.Height);
+                    TextRenderer.DrawText(g, projects[index].Name, Font, label,
+                        isSelected ? Skin.A2 : Skin.Text,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                }
+                if (projects.Count > VisibleRows)
+                {
+                    int trackY = Pad + 3, trackH = VisibleRows * RowH - 6;
+                    int thumbH = Math.Max(18, trackH * VisibleRows / projects.Count);
+                    int thumbY = trackY + (trackH - thumbH) * first / (projects.Count - VisibleRows);
+                    using (SolidBrush thumb = new SolidBrush(Color.FromArgb(110, Skin.Muted)))
+                    using (GraphicsPath tp = Skin.Round(new Rectangle(Width - 5, thumbY, 2, thumbH), 1))
+                        g.FillPath(thumb, tp);
+                }
+            }
+
+            protected override void OnMouseMove(MouseEventArgs e)
+            {
+                int row = (e.Y - Pad) / RowH;
+                int next = e.Y >= Pad && row >= 0 && row < VisibleRows && first + row < projects.Count ? first + row : -1;
+                if (hot != next) { hot = next; Invalidate(); }
+            }
+
+            protected override void OnMouseLeave(EventArgs e) { hot = -1; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnMouseWheel(MouseEventArgs e)
+            { first = Math.Max(0, Math.Min(projects.Count - VisibleRows, first - Math.Sign(e.Delta))); Invalidate(); }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    int row = (e.Y - Pad) / RowH, index = first + row;
+                    if (e.Y >= Pad && row >= 0 && row < VisibleRows && index < projects.Count)
+                    { WorkProject target = projects[index]; Close(); owner.PickProject(target); return; }
+                }
+                base.OnMouseUp(e);
+            }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -2966,10 +3070,11 @@ namespace WorkTimer
     class SettingsDialog : Form
     {
         readonly TrayApp app;
-        GButton bWidget, bHotkey, bAuto, bClose, bDone, bUpdates;
+        GButton bWidget, bHotkey, bAuto, bClose, bDone, bUpdates, bCheckNow;
         GSlider slider;
+        bool checkNowRequested;
 
-        const int W = 420, H = 404;
+        const int W = 420, H = 454;
 
         public SettingsDialog(TrayApp owner)
         {
@@ -3008,6 +3113,9 @@ namespace WorkTimer
             bAuto.Click += delegate { app.ToggleAutostartPub(); Sync(); };
             bUpdates = Mk(GButton.Kind.Ghost, "", W - 140, 290, 116, 34);
             bUpdates.Click += delegate { app.SetAutoUpdates(!app.AutoUpdates); Sync(); };
+            bCheckNow = Mk(GButton.Kind.Ghost, "Проверить обновления", 20, 342, 210, 34);
+            bCheckNow.Click += delegate { checkNowRequested = true; Close(); };
+            FormClosed += delegate { if (checkNowRequested) app.CheckUpdatesManualPub(); };
 
             bDone = Mk(GButton.Kind.Primary, "Готово", 20, H - 52, 120, 36);
             bDone.Font = Skin.F(9.5f, FontStyle.Bold);
