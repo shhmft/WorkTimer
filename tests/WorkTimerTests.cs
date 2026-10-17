@@ -204,6 +204,35 @@ namespace WorkTimer
                         }
                     dialog.Close();
                 }
+                // A long picker must reveal the current work and keep keyboard
+                // navigation independent from the running timers.
+                using (HudWidget widget = new HudWidget(app))
+                {
+                    List<WorkProject> pickerProjects = new List<WorkProject>(projects);
+                    for (int i = 0; i < 9; i++) pickerProjects.Add(new WorkProject("picker-" + i, "Работа " + i));
+                    Type pickerType = typeof(HudWidget).GetNestedType("ProjectPickerForm", BindingFlags.NonPublic);
+                    using (Form picker = (Form)Activator.CreateInstance(pickerType,
+                        new object[] { widget, pickerProjects, pickerProjects[pickerProjects.Count - 1] }))
+                    {
+                        int start = (int)pickerType.GetField("first", Hidden).GetValue(picker);
+                        Check(start == pickerProjects.Count - 6, "Picker reveals current work at end of long list");
+                        Check(!picker.Region.IsVisible(0, 0), "Picker native window excludes black square corners");
+                        if (args.Length > 0)
+                            using (Bitmap bitmap = new Bitmap(picker.Width, picker.Height))
+                            {
+                                picker.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                                bitmap.Save(Path.Combine(Path.GetDirectoryName(args[0]), "preview-work-picker.png"),
+                                    System.Drawing.Imaging.ImageFormat.Png);
+                            }
+                        MethodInfo key = pickerType.GetMethod("ProcessCmdKey", Hidden);
+                        key.Invoke(picker, new object[] { new Message(), Keys.Home });
+                        Check((int)pickerType.GetField("first", Hidden).GetValue(picker) == 0,
+                            "Keyboard navigation scrolls picker to first work");
+                        key.Invoke(picker, new object[] { new Message(), Keys.Enter });
+                        Check(app.CurrentProjectPub == first && first.RunStart.HasValue && second.RunStart.HasValue,
+                            "Keyboard selection preserves parallel timers");
+                    }
+                }
                 Check(Field<ProjectList>(app, "projectList").Rows.Count == 3, "Visible work list reflects all works");
                 Console.WriteLine("PASS: " + checks + " checks; isolated data: " + testDir);
                 return 0;

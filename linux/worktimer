@@ -909,6 +909,8 @@ class ProjectPicker(Gtk.Window):
     def __init__(self, widget):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.owner_widget = widget
+        self.set_transient_for(widget)
+        self.set_destroy_with_parent(True)
         self.projects = list(widget.core.projects)
         self.first = 0
         self.hot = -1
@@ -923,6 +925,8 @@ class ProjectPicker(Gtk.Window):
         if visual:
             self.set_visual(visual)
         self.rows = min(self.MAX_ROWS, len(self.projects))
+        self.hot = self.projects.index(widget.core.current)
+        self.first = max(0, min(self.hot, len(self.projects) - self.rows))
         self.resize(widget.WW, self.PAD * 2 + self.rows * self.ROW_H)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
                         Gdk.EventMask.POINTER_MOTION_MASK |
@@ -934,6 +938,11 @@ class ProjectPicker(Gtk.Window):
         self.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
         self.connect("focus-out-event", self.on_focus_out)
+        self.connect("destroy", self.on_destroy)
+
+    def on_destroy(self, *_):
+        if self.owner_widget.project_picker is self:
+            self.owner_widget.project_picker = None
 
     def show_picker(self, ev):
         self.show_all()
@@ -1027,8 +1036,27 @@ class ProjectPicker(Gtk.Window):
     def on_key(self, _w, ev):
         if ev.keyval == Gdk.KEY_Escape:
             self.destroy()
-            self.owner_widget.project_picker = None
-        return True
+            return True
+        if ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and 0 <= self.hot < len(self.projects):
+            project = self.projects[self.hot]
+            self.destroy()
+            self.owner_widget.select_project(project)
+            return True
+        if ev.keyval in (Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Home, Gdk.KEY_End):
+            if ev.keyval == Gdk.KEY_Home:
+                self.hot = 0
+            elif ev.keyval == Gdk.KEY_End:
+                self.hot = len(self.projects) - 1
+            else:
+                self.hot = max(0, min(len(self.projects) - 1,
+                                     self.hot + (-1 if ev.keyval == Gdk.KEY_Up else 1)))
+            if self.hot < self.first:
+                self.first = self.hot
+            if self.hot >= self.first + self.rows:
+                self.first = self.hot - self.rows + 1
+            self.queue_draw()
+            return True
+        return False
 
     def on_focus_out(self, *_):
         GLib.timeout_add(120, self.close_if_inactive)
