@@ -106,6 +106,19 @@ with tempfile.TemporaryDirectory(prefix="worktimer-gui-") as folder:
     check(picker.first == 1)
     picker.on_press(None, types.SimpleNamespace(button=1, y=picker.PAD + 1))
     check(app.core.current is second and app.core.running_count == widget_running)
+    app.core.select(app.core.projects[-1])
+    picker = wt.ProjectPicker(app.widget)
+    app.widget.project_picker = picker
+    check(picker.first == len(app.core.projects) - picker.rows)
+    picker.on_key(None, types.SimpleNamespace(keyval=Gdk.KEY_Home))
+    check(picker.first == 0 and picker.hot == 0)
+    picker.on_key(None, types.SimpleNamespace(keyval=Gdk.KEY_Return))
+    check(app.core.current is first and app.core.running_count == widget_running)
+    check(app.widget.project_picker is None)
+    picker = wt.ProjectPicker(app.widget)
+    app.widget.project_picker = picker
+    picker.destroy()
+    check(app.widget.project_picker is None)
     app.core.projects[:] = [first, second]
     app.core.select(second)
     first.run_start = dt.datetime.now() - dt.timedelta(minutes=20)

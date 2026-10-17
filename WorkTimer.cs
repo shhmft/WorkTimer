@@ -2821,6 +2821,8 @@ namespace WorkTimer
             {
                 this.owner = owner; this.selected = selected;
                 projects = new List<WorkProject>(values);
+                hot = Math.Max(0, projects.IndexOf(selected));
+                first = Math.Max(0, Math.Min(hot, projects.Count - VisibleRows));
                 FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true;
                 StartPosition = FormStartPosition.Manual; Width = WW; Height = Pad * 2 + VisibleRows * RowH;
                 // Keep the menu legible even when the underlying widget is translucent.
@@ -2833,6 +2835,23 @@ namespace WorkTimer
                 SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                          ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
                 Deactivate += delegate { Close(); };
+            }
+
+            protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+            {
+                if (keyData == Keys.Escape) { Close(); return true; }
+                if (keyData == Keys.Enter && hot >= 0 && hot < projects.Count)
+                { WorkProject target = projects[hot]; Close(); owner.PickProject(target); return true; }
+                if (keyData == Keys.Up || keyData == Keys.Down || keyData == Keys.Home || keyData == Keys.End)
+                {
+                    if (keyData == Keys.Home) hot = 0;
+                    else if (keyData == Keys.End) hot = projects.Count - 1;
+                    else hot = Math.Max(0, Math.Min(projects.Count - 1, hot + (keyData == Keys.Up ? -1 : 1)));
+                    if (hot < first) first = hot;
+                    if (hot >= first + VisibleRows) first = hot - VisibleRows + 1;
+                    Invalidate(); return true;
+                }
+                return base.ProcessCmdKey(ref msg, keyData);
             }
 
             public void ShowAt(Point point) { Location = point; Show(owner); }
@@ -2961,6 +2980,7 @@ namespace WorkTimer
         {
             if (disposing)
             {
+                if (projectPicker != null) { projectPicker.Dispose(); projectPicker = null; }
                 if (tick != null) { tick.Stop(); tick.Dispose(); tick = null; }
                 if (fadeIn != null) { fadeIn.Stop(); fadeIn.Dispose(); fadeIn = null; }
                 if (panelAnim != null) { panelAnim.Stop(); panelAnim.Dispose(); panelAnim = null; }
