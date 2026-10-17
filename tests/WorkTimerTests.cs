@@ -217,6 +217,13 @@ namespace WorkTimer
                         int start = (int)pickerType.GetField("first", Hidden).GetValue(picker);
                         Check(start == pickerProjects.Count - 6, "Picker reveals current work at end of long list");
                         Check(!picker.Region.IsVisible(0, 0), "Picker native window excludes black square corners");
+                        if (args.Length > 0)
+                            using (Bitmap bitmap = new Bitmap(picker.Width, picker.Height))
+                            {
+                                picker.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                                bitmap.Save(Path.Combine(Path.GetDirectoryName(args[0]), "preview-work-picker.png"),
+                                    System.Drawing.Imaging.ImageFormat.Png);
+                            }
                         MethodInfo key = pickerType.GetMethod("ProcessCmdKey", Hidden);
                         key.Invoke(picker, new object[] { new Message(), Keys.Home });
                         Check((int)pickerType.GetField("first", Hidden).GetValue(picker) == 0,
